@@ -1,0 +1,18 @@
+[package]
+name = "carpe"
+version = "0.1.0"
+edition = "2021"
+description = "Multiplex cargo target dirs across git worktrees"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "carpe"
+path = "src/main.rs"
+
+# Deliberately no [dependencies]. Locking is done via a small unsafe FFI
+# shim over flock(2) / LockFileEx (see src/lockfile.rs) so the whole tool
+# builds with nothing but the standard library and system libc — no
+# crates.io fetch required, no version drift to track.
+
+[profile.release]
+opt-level = 2
