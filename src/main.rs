@@ -144,7 +144,30 @@ fn run_cargo(args: &[String]) {
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
 
-    let mut candidates = existing_slot_indices(&root, &dir_name);
+    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root);
+
+    match preferred {
+        Some(p) if p != slot_idx => eprintln!(
+            "carpe: preferred slot {dir_name}-{p} is busy, using {dir_name}-{slot_idx} instead (parallel build)"
+        ),
+        _ => eprintln!("carpe: using {}", slot_path.display()),
+    }
+
+    let status = Command::new("cargo")
+        .args(args)
+        .env("CARGO_TARGET_DIR", &slot_path)
+        .status()
+        .expect("carpe: failed to spawn cargo (is it in PATH?)");
+
+    // _lock is still held here, for the whole duration of the cargo run.
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+fn select_slot(identity: &RepoIdentity, root: &Path) -> (usize, PathBuf, lockfile::Lock) {
+    let dir_name = identity.pool_name();
+    let preferred = identity.read_preferred_slot();
+
+    let mut candidates = existing_slot_indices(root, &dir_name);
     candidates.sort_unstable();
     if let Some(p) = preferred {
         if let Some(pos) = candidates.iter().position(|&i| i == p) {
@@ -172,7 +195,7 @@ fn run_cargo(args: &[String]) {
         }
     }
 
-    let (slot_idx, slot_path, _lock) = chosen.unwrap_or_else(|| {
+    let (slot_idx, slot_path, lock) = chosen.unwrap_or_else(|| {
         let next = candidates.iter().max().map_or(0, |m| m + 1);
         let slot_path = root.join(format!("{dir_name}-{next}"));
         fs::create_dir_all(&slot_path).expect("carpe: cannot create new target-dir slot");
@@ -187,21 +210,7 @@ fn run_cargo(args: &[String]) {
         identity.write_preferred_slot(slot_idx);
     }
 
-    match preferred {
-        Some(p) if p != slot_idx => eprintln!(
-            "carpe: preferred slot {dir_name}-{p} is busy, using {dir_name}-{slot_idx} instead (parallel build)"
-        ),
-        _ => eprintln!("carpe: using {}", slot_path.display()),
-    }
-
-    let status = Command::new("cargo")
-        .args(args)
-        .env("CARGO_TARGET_DIR", &slot_path)
-        .status()
-        .expect("carpe: failed to spawn cargo (is it on your PATH?)");
-
-    // _lock is still held here, for the whole duration of the cargo run.
-    std::process::exit(status.code().unwrap_or(1));
+    (slot_idx, slot_path, lock)
 }
 
 fn run_status() {
@@ -311,4 +320,150 @@ fn short_hash(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     format!("{:016x}", h.finish())[..8].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_test_repo() -> Option<(PathBuf, PathBuf, PathBuf)> {
+        let sys_temp = env::temp_dir();
+        let test_run_id = format!("carpe_test_{}_{}", std::process::id(), rand_nonce());
+        let root_dir = sys_temp.join(test_run_id);
+        fs::create_dir_all(&root_dir).ok()?;
+
+        let main_repo = root_dir.join("main_repo");
+        fs::create_dir_all(&main_repo).ok()?;
+
+        // git init main_repo
+        let status = Command::new("git")
+            .arg("init")
+            .arg(&main_repo)
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+
+        // Config dummy git user for commit
+        let _ = Command::new("git").arg("-C").arg(&main_repo).args(["config", "user.name", "Carpe Test"]).status();
+        let _ = Command::new("git").arg("-C").arg(&main_repo).args(["config", "user.email", "test@example.com"]).status();
+
+        // Create initial commit
+        fs::write(main_repo.join("README.md"), "test").ok()?;
+        let _ = Command::new("git").arg("-C").arg(&main_repo).args(["add", "."]).status();
+        let _ = Command::new("git").arg("-C").arg(&main_repo).args(["commit", "-m", "init"]).status();
+
+        // Create linked worktree
+        let wt_repo = root_dir.join("wt_repo");
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&main_repo)
+            .args(["worktree", "add", "-b", "feature", wt_repo.to_str().unwrap()])
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+
+        Some((root_dir, main_repo, wt_repo))
+    }
+
+    fn rand_nonce() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+    }
+
+    #[test]
+    fn test_git_worktree_shared_pool_and_isolated_markers() {
+        let Some((root_dir, main_repo, wt_repo)) = setup_test_repo() else {
+            eprintln!("Skipping git test: git command not available");
+            return;
+        };
+
+        let main_identity = RepoIdentity::detect(&main_repo);
+        let wt_identity = RepoIdentity::detect(&wt_repo);
+
+        // 1. Both worktrees must share the exact same pool name
+        assert_eq!(
+            main_identity.pool_name(),
+            wt_identity.pool_name(),
+            "All worktrees of the same repo must share the same target slot pool name"
+        );
+
+        // 2. Each worktree must have a distinct private marker directory
+        assert_ne!(
+            main_identity.marker_dir, wt_identity.marker_dir,
+            "Each worktree must store its slot preference in its own private git dir"
+        );
+
+        // 3. Slot preferences written in one worktree must not bleed into another
+        main_identity.write_preferred_slot(0);
+        wt_identity.write_preferred_slot(1);
+
+        assert_eq!(main_identity.read_preferred_slot(), Some(0));
+        assert_eq!(wt_identity.read_preferred_slot(), Some(1));
+
+        // Cleanup
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn test_worktree_slot_contention_and_fallback() {
+        let Some((root_dir, main_repo, wt_repo)) = setup_test_repo() else {
+            eprintln!("Skipping git test: git command not available");
+            return;
+        };
+
+        let cache_temp = root_dir.join("carpe_cache");
+        fs::create_dir_all(&cache_temp).unwrap();
+
+        let main_identity = RepoIdentity::detect(&main_repo);
+        let wt_identity = RepoIdentity::detect(&wt_repo);
+
+        // Worktree A starts a build and acquires slot 0
+        let (slot_a, path_a, lock_a) = select_slot(&main_identity, &cache_temp);
+        assert_eq!(slot_a, 0, "First worktree build should allocate slot 0");
+        assert!(path_a.ends_with(format!("{}-0", main_identity.pool_name())));
+
+        // Worktree B starts a build while Worktree A is still building (lock_a held)
+        let (slot_b, path_b, lock_b) = select_slot(&wt_identity, &cache_temp);
+        assert_eq!(
+            slot_b, 1,
+            "Second worktree should fall back to slot 1 when slot 0 is locked"
+        );
+        assert!(path_b.ends_with(format!("{}-1", wt_identity.pool_name())));
+
+        // Worktree B records slot 1 as its preferred slot
+        assert_eq!(wt_identity.read_preferred_slot(), Some(1));
+
+        // Worktree A finishes build and releases lock_a
+        drop(lock_a);
+        // Worktree B finishes build and releases lock_b
+        drop(lock_b);
+
+        // Worktree B runs build again; slot 1 is free and preferred for B, so B reuses slot 1
+        let (slot_b2, _, lock_b2) = select_slot(&wt_identity, &cache_temp);
+        assert_eq!(slot_b2, 1, "Worktree B should reuse preferred slot 1 when free");
+
+        // Worktree A runs build again; slot 0 is free and preferred for A, so A reuses slot 0
+        let (slot_a2, _, lock_a2) = select_slot(&main_identity, &cache_temp);
+        assert_eq!(slot_a2, 0, "Worktree A should reuse preferred slot 0 when free");
+
+        drop(lock_b2);
+        drop(lock_a2);
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn test_utility_functions() {
+        assert_eq!(sanitize("my_repo.v1"), "my_repo-v1");
+        assert_eq!(sanitize("my-normal-repo"), "my-normal-repo");
+        assert_eq!(short_hash("hello"), short_hash("hello"));
+        assert_ne!(short_hash("hello"), short_hash("world"));
+        assert_eq!(short_hash("hello").len(), 8);
+    }
 }
