@@ -6,8 +6,12 @@ of each maintaining (and rebuilding) its own — while still letting you build
 in two worktrees at once instead of blocking on cargo's own build-dir lock.
 
 ```
-carpe <cargo-args...>   # e.g. `carpe build`, `carpe test --release`, `carpe check`
-carpe status             # show the slots for the current repo and whether they're busy
+carpe <cargo-args...>      # e.g. `carpe build`, `carpe test --release`, `carpe check`
+carpe status                # show the slots for the current repo and whether they're busy
+carpe prune                 # clean up target slots for the current repo not held by any build
+carpe prune -i              # interactive menu to choose which target slots to delete
+carpe prune --lru <num>     # keep the <num> newest unlocked target slots and prune older ones
+carpe prune -a              # prune unlocked target slots across all repositories under ~/.cache/carpe
 ```
 
 Everything after `carpe` is passed straight through to `cargo`, unmodified.
@@ -111,9 +115,7 @@ install -Dm755 target/release/carpe ~/.local/bin/carpe   # or wherever's on your
 - **NFS / network filesystems:** like cargo itself, `flock` doesn't work
   reliably on some network filesystems. If your `~/.cache` is on one of
   these, locking may silently not provide real exclusion.
-- **Pool never shrinks automatically.** Old slots aren't pruned — add a
-  `carpe clean` (rm -rf all slots not currently locked) if disk usage
-  becomes a problem; not implemented here to keep the first version small.
+- **Pruning old slots:** Target directories accumulate over time. Use `carpe prune` to safely delete unlocked slots, `carpe prune --lru <num>` to keep only the `<num>` newest slots, or `carpe prune -i` for an interactive selection prompt. Built-in locking ensures active build directories are never deleted.
 - **Windows support is best-effort** (`LockFileEx`-based) and less tested
   than the Unix `flock` path.
 - If you pass an explicit `--target-dir` yourself, carpe doesn't currently
