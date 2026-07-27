@@ -178,7 +178,22 @@ fn run_cargo(args: &[String]) {
         .expect("carpe: failed to spawn cargo (is it in PATH?)");
 
     // _lock is still held here, for the whole duration of the cargo run.
-    std::process::exit(status.code().unwrap_or(1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(code) = status.code() {
+            std::process::exit(code);
+        } else if let Some(signal) = status.signal() {
+            std::process::exit(128 + signal);
+        } else {
+            std::process::exit(1);
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 fn select_slot(identity: &RepoIdentity, root: &Path) -> (usize, PathBuf, lockfile::Lock) {
@@ -702,10 +717,17 @@ fn canonicalize_best_effort(p: &Path) -> PathBuf {
 }
 
 fn cache_root() -> PathBuf {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .expect("carpe: $HOME is not set");
-    home.join(".cache").join("carpe")
+    if let Some(xdg) = env::var_os("XDG_CACHE_HOME").filter(|s| !s.is_empty()) {
+        PathBuf::from(xdg).join("carpe")
+    } else if let Some(home) = env::var_os("HOME").filter(|s| !s.is_empty()) {
+        PathBuf::from(home).join(".cache").join("carpe")
+    } else if let Some(local_app_data) = env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
+        PathBuf::from(local_app_data).join("carpe")
+    } else if let Some(user_profile) = env::var_os("USERPROFILE").filter(|s| !s.is_empty()) {
+        PathBuf::from(user_profile).join(".cache").join("carpe")
+    } else {
+        env::temp_dir().join("carpe")
+    }
 }
 
 fn sanitize(s: &str) -> String {
@@ -967,5 +989,14 @@ mod tests {
         assert!(path2.exists(), "Newest slot 2 should be kept");
 
         let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_cache_root_resolution() {
+        let root = cache_root();
+        assert!(
+            root.ends_with("carpe"),
+            "cache_root path must end with 'carpe'"
+        );
     }
 }
