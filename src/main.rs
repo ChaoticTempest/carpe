@@ -62,8 +62,12 @@ fn print_usage() {
     eprintln!();
     eprintln!("prune options:");
     eprintln!("  -i, --interactive          choose interactively which slots to prune");
-    eprintln!("  --lru <num>                keep the <num> newest unlocked slots and prune older ones");
-    eprintln!("  -a, --all                  prune across all repository pools under ~/.cache/carpe");
+    eprintln!(
+        "  --lru <num>                keep the <num> newest unlocked slots and prune older ones"
+    );
+    eprintln!(
+        "  -a, --all                  prune across all repository pools under ~/.cache/carpe"
+    );
 }
 
 /// Identifies the repo-wide pool and this worktree's private marker location.
@@ -332,7 +336,11 @@ fn run_prune(args: &[String]) {
     let current_pool = identity.pool_name();
     let preferred = identity.read_preferred_slot();
 
-    let filter = if all_pools { None } else { Some(current_pool.as_str()) };
+    let filter = if all_pools {
+        None
+    } else {
+        Some(current_pool.as_str())
+    };
     let mut slots = collect_slots(&root, filter, preferred);
 
     if slots.is_empty() {
@@ -515,7 +523,9 @@ fn run_interactive_prune(slots: &mut [SlotCandidate]) {
         .collect();
 
     let selections = match MultiSelect::with_theme(&ColorfulTheme::default())
-        .with_prompt("Select target-dir slots to prune (Space to toggle, Enter to confirm, Esc/q to cancel)")
+        .with_prompt(
+            "Select target-dir slots to prune (Space to toggle, Enter to confirm, Esc/q to cancel)",
+        )
         .items(&items)
         .interact_opt()
     {
@@ -664,7 +674,12 @@ fn git_dir(cwd: &Path) -> Option<PathBuf> {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(cwd).args(args).output().ok()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -735,20 +750,42 @@ mod tests {
         }
 
         // Config dummy git user for commit
-        let _ = Command::new("git").arg("-C").arg(&main_repo).args(["config", "user.name", "Carpe Test"]).status();
-        let _ = Command::new("git").arg("-C").arg(&main_repo).args(["config", "user.email", "test@example.com"]).status();
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&main_repo)
+            .args(["config", "user.name", "Carpe Test"])
+            .status();
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&main_repo)
+            .args(["config", "user.email", "test@example.com"])
+            .status();
 
         // Create initial commit
         fs::write(main_repo.join("README.md"), "test").ok()?;
-        let _ = Command::new("git").arg("-C").arg(&main_repo).args(["add", "."]).status();
-        let _ = Command::new("git").arg("-C").arg(&main_repo).args(["commit", "-m", "init"]).status();
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&main_repo)
+            .args(["add", "."])
+            .status();
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&main_repo)
+            .args(["commit", "-m", "init"])
+            .status();
 
         // Create linked worktree
         let wt_repo = root_dir.join("wt_repo");
         let status = Command::new("git")
             .arg("-C")
             .arg(&main_repo)
-            .args(["worktree", "add", "-b", "feature", wt_repo.to_str().unwrap()])
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                wt_repo.to_str().unwrap(),
+            ])
             .status()
             .ok()?;
         if !status.success() {
@@ -836,11 +873,17 @@ mod tests {
 
         // Worktree B runs build again; slot 1 is free and preferred for B, so B reuses slot 1
         let (slot_b2, _, lock_b2) = select_slot(&wt_identity, &cache_temp);
-        assert_eq!(slot_b2, 1, "Worktree B should reuse preferred slot 1 when free");
+        assert_eq!(
+            slot_b2, 1,
+            "Worktree B should reuse preferred slot 1 when free"
+        );
 
         // Worktree A runs build again; slot 0 is free and preferred for A, so A reuses slot 0
         let (slot_a2, _, lock_a2) = select_slot(&main_identity, &cache_temp);
-        assert_eq!(slot_a2, 0, "Worktree A should reuse preferred slot 0 when free");
+        assert_eq!(
+            slot_a2, 0,
+            "Worktree A should reuse preferred slot 0 when free"
+        );
 
         drop(lock_b2);
         drop(lock_a2);

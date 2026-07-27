@@ -74,7 +74,10 @@ mod tests {
 
         // 4. Subsequent lock attempt succeeds
         let lock3 = try_lock(&lock_path).expect("lock3 should succeed after drop");
-        assert!(lock3.is_some(), "lock should be acquired after first lock is dropped");
+        assert!(
+            lock3.is_some(),
+            "lock should be acquired after first lock is dropped"
+        );
 
         // Cleanup
         drop(lock3);
