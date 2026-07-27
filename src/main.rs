@@ -27,6 +27,8 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use dialoguer::{theme::ColorfulTheme, MultiSelect};
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
@@ -258,6 +260,7 @@ fn run_status() {
     }
 }
 
+#[derive(Clone)]
 struct SlotCandidate {
     name: String,
     path: PathBuf,
@@ -490,83 +493,49 @@ fn run_lru_prune(slots: &mut [SlotCandidate], keep_count: usize) {
 }
 
 fn run_interactive_prune(slots: &mut [SlotCandidate]) {
-    println!("Target-dir slots available:");
-    println!();
-    for (idx, slot) in slots.iter().enumerate() {
-        let status = if slot.is_busy { "[busy]" } else { "[free]" };
-        let pref = if slot.is_preferred {
-            " <- preferred"
-        } else {
-            ""
-        };
-        println!(
-            "  [{}] {} ({}, {}) {}{}",
-            idx + 1,
-            slot.name,
-            format_size(slot.size_bytes),
-            format_time_ago(slot.mtime),
-            status,
-            pref
-        );
-    }
-    println!();
-    print!("Enter slot numbers to prune (e.g. '1, 2', 'all', or 'q' to cancel): ");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let free_slots: Vec<&SlotCandidate> = slots.iter().filter(|s| !s.is_busy).collect();
 
-    let mut input = String::new();
-    if std::io::stdin().read_line(&mut input).is_err() {
+    if free_slots.is_empty() {
+        println!("No unlocked target-dir slots available to prune.");
         return;
     }
-    let input = input.trim();
-    if input.eq_ignore_ascii_case("q")
-        || input.eq_ignore_ascii_case("quit")
-        || input.is_empty()
+
+    let items: Vec<String> = free_slots
+        .iter()
+        .map(|s| {
+            let pref = if s.is_preferred { " <- preferred" } else { "" };
+            format!(
+                "{} ({}, {}) [free]{}",
+                s.name,
+                format_size(s.size_bytes),
+                format_time_ago(s.mtime),
+                pref
+            )
+        })
+        .collect();
+
+    let selections = match MultiSelect::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select target-dir slots to prune (Space to toggle, Enter to confirm, Esc/q to cancel)")
+        .items(&items)
+        .interact_opt()
     {
-        println!("Aborted.");
-        return;
-    }
-
-    let mut selected_indices = Vec::new();
-    if input.eq_ignore_ascii_case("all") {
-        for (idx, slot) in slots.iter().enumerate() {
-            if !slot.is_busy {
-                selected_indices.push(idx);
-            }
+        Ok(Some(selected)) => selected,
+        Ok(None) | Err(_) => {
+            println!("Interactive prune cancelled.");
+            return;
         }
-    } else {
-        for part in input.split([',', ' ']) {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            if let Ok(num) = part.parse::<usize>() {
-                if num >= 1 && num <= slots.len() {
-                    let idx = num - 1;
-                    if slots[idx].is_busy {
-                        println!(
-                            "Note: slot {} is currently busy and cannot be pruned.",
-                            slots[idx].name
-                        );
-                    } else if !selected_indices.contains(&idx) {
-                        selected_indices.push(idx);
-                    }
-                } else {
-                    eprintln!("Invalid slot number: {num}");
-                }
-            }
-        }
-    }
+    };
 
-    if selected_indices.is_empty() {
-        println!("No valid unlocked slots selected. Aborting.");
+    if selections.is_empty() {
+        println!("No target-dir slots selected. Aborting.");
         return;
     }
 
     let mut pruned_count = 0;
     let mut total_reclaimed = 0u64;
 
-    for &idx in &selected_indices {
-        let slot = &slots[idx];
+    for idx in selections {
+        let slot = free_slots[idx];
         let lock_path = slot.path.join(".carpe-lock");
         match lockfile::try_lock(&lock_path) {
             Ok(Some(_lock)) => {
