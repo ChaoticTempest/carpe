@@ -93,21 +93,12 @@ root: /home/you/.cache/carpe
 
 ## Build & install
 
-No external crates — the only dependency is the standard library (locking
-is done via a small `flock`/`LockFileEx` FFI shim in `src/lockfile.rs`), so
-this builds with nothing but a stable Rust toolchain and no network access
-to crates.io.
+`carpe` uses [`fd-lock`](https://crates.io/crates/fd-lock) for cross-platform advisory file locking (`flock` on Unix, `LockFileEx` on Windows).
 
 ```
 cargo build --release
 install -Dm755 target/release/carpe ~/.local/bin/carpe   # or wherever's on your PATH
 ```
-
-> **Note:** I wrote and carefully reviewed this code by hand but wasn't able
-> to compile it in the sandbox this was written in (no Rust toolchain, and
-> no network access to install one). Please run `cargo build` yourself
-> before relying on it — if anything doesn't compile, paste me the error
-> and I'll fix it immediately.
 
 ## Caveats / things you may want to tweak
 

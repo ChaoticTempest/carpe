@@ -9,10 +9,10 @@ license = "MIT OR Apache-2.0"
 name = "carpe"
 path = "src/main.rs"
 
-# Deliberately no [dependencies]. Locking is done via a small unsafe FFI
-# shim over flock(2) / LockFileEx (see src/lockfile.rs) so the whole tool
-# builds with nothing but the standard library and system libc — no
-# crates.io fetch required, no version drift to track.
+# Locking is managed via fd-lock for cross-platform advisory file locks (flock/LockFileEx).
 
 [profile.release]
 opt-level = 2
+
+[dependencies]
+fd-lock = "4.0.4"
