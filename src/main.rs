@@ -717,17 +717,9 @@ fn canonicalize_best_effort(p: &Path) -> PathBuf {
 }
 
 fn cache_root() -> PathBuf {
-    if let Some(xdg) = env::var_os("XDG_CACHE_HOME").filter(|s| !s.is_empty()) {
-        PathBuf::from(xdg).join("carpe")
-    } else if let Some(home) = env::var_os("HOME").filter(|s| !s.is_empty()) {
-        PathBuf::from(home).join(".cache").join("carpe")
-    } else if let Some(local_app_data) = env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
-        PathBuf::from(local_app_data).join("carpe")
-    } else if let Some(user_profile) = env::var_os("USERPROFILE").filter(|s| !s.is_empty()) {
-        PathBuf::from(user_profile).join(".cache").join("carpe")
-    } else {
-        env::temp_dir().join("carpe")
-    }
+    dirs::cache_dir()
+        .unwrap_or_else(env::temp_dir)
+        .join("carpe")
 }
 
 fn sanitize(s: &str) -> String {
