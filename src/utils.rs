@@ -89,6 +89,37 @@ pub fn extract_manifest_path(args: &[String]) -> Option<PathBuf> {
     None
 }
 
+pub fn normalize_args(raw_args: Vec<String>) -> Vec<String> {
+    let args = if raw_args.len() == 1 && raw_args[0].contains(' ') {
+        shell_words::split(&raw_args[0]).unwrap_or(raw_args)
+    } else {
+        raw_args
+    };
+
+    let mut normalized = Vec::new();
+    for arg in args {
+        if let Some(rest) = arg.strip_prefix("--features ") {
+            normalized.push("--features".to_string());
+            normalized.push(rest.trim().to_string());
+        } else if let Some(rest) = arg.strip_prefix("--package ") {
+            normalized.push("--package".to_string());
+            normalized.push(rest.trim().to_string());
+        } else if let Some(rest) = arg.strip_prefix("--target ") {
+            normalized.push("--target".to_string());
+            normalized.push(rest.trim().to_string());
+        } else if let Some(rest) = arg.strip_prefix("--profile ") {
+            normalized.push("--profile".to_string());
+            normalized.push(rest.trim().to_string());
+        } else if let Some(rest) = arg.strip_prefix("--manifest-path ") {
+            normalized.push("--manifest-path".to_string());
+            normalized.push(rest.trim().to_string());
+        } else {
+            normalized.push(arg);
+        }
+    }
+    normalized
+}
+
 pub fn extract_toolchain(args: &[String]) -> (Option<String>, &[String]) {
     if let Some(first) = args.first() {
         if first.starts_with('+') && first.len() > 1 {
@@ -349,6 +380,17 @@ mod tests {
         let (tc2, rest2) = extract_toolchain(&args2);
         assert_eq!(tc2, None);
         assert_eq!(rest2, &["build", "--release"]);
+    }
+
+    #[test]
+    fn test_normalize_args() {
+        let raw1 = vec!["--features test-feature,debug-page".to_string()];
+        let norm1 = normalize_args(raw1);
+        assert_eq!(norm1, vec!["--features", "test-feature,debug-page"]);
+
+        let raw2 = vec!["build --release --features foo".to_string()];
+        let norm2 = normalize_args(raw2);
+        assert_eq!(norm2, vec!["build", "--release", "--features", "foo"]);
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub struct CargoBuildState {
     pub toolchain: Option<String>,
     pub profile: Option<String>,
     pub target: Option<String>,
+    pub features: Option<String>,
 }
 
 impl CargoBuildState {
@@ -38,6 +39,7 @@ impl CargoBuildState {
         let (toolchain, sub_args) = extract_toolchain(args);
         let mut profile: Option<String> = None;
         let mut target: Option<String> = None;
+        let mut features: Option<String> = None;
 
         let mut i = 0;
         while i < sub_args.len() {
@@ -58,6 +60,13 @@ impl CargoBuildState {
                 }
             } else if let Some(t) = arg.strip_prefix("--target=") {
                 target = Some(t.to_string());
+            } else if arg == "--features" || arg == "-F" {
+                if i + 1 < sub_args.len() {
+                    features = Some(sub_args[i + 1].clone());
+                    i += 1;
+                }
+            } else if let Some(f) = arg.strip_prefix("--features=") {
+                features = Some(f.to_string());
             }
             i += 1;
         }
@@ -70,6 +79,7 @@ impl CargoBuildState {
             toolchain,
             profile,
             target,
+            features,
         }
     }
 }
@@ -81,6 +91,7 @@ pub struct SlotMeta {
     pub toolchain: Option<String>,
     pub profile: Option<String>,
     pub target: Option<String>,
+    pub features: Option<String>,
     pub timestamp: u64,
 }
 
@@ -100,6 +111,8 @@ impl SlotMeta {
                 meta.profile = Some(val.to_string());
             } else if let Some(val) = line.strip_prefix("target=") {
                 meta.target = Some(val.to_string());
+            } else if let Some(val) = line.strip_prefix("features=") {
+                meta.features = Some(val.to_string());
             } else if let Some(val) = line.strip_prefix("timestamp=") {
                 if let Ok(ts) = val.parse::<u64>() {
                     meta.timestamp = ts;
@@ -130,6 +143,9 @@ impl SlotMeta {
         if let Some(t) = &build_state.target {
             out.push_str(&format!("target={t}\n"));
         }
+        if let Some(f) = &build_state.features {
+            out.push_str(&format!("features={f}\n"));
+        }
         out.push_str(&format!("timestamp={ts}\n"));
         let _ = fs::write(slot_path.join(".carpe-meta"), out);
     }
@@ -147,6 +163,9 @@ impl SlotMeta {
             score += 40;
         }
         if matches!((&self.target, &current_build.target), (Some(t1), Some(t2)) if t1 == t2) {
+            score += 40;
+        }
+        if matches!((&self.features, &current_build.features), (Some(f1), Some(f2)) if f1 == f2) {
             score += 40;
         }
         if matches!((&self.branch, &current_git.branch), (Some(b1), Some(b2)) if b1 == b2) {
@@ -193,6 +212,7 @@ mod tests {
             toolchain: None,
             profile: Some("release".into()),
             target: Some("wasm32-unknown-unknown".into()),
+            features: None,
         };
 
         SlotMeta::write(&slot_path, &g_state, &b_state);

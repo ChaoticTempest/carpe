@@ -23,7 +23,7 @@ use utils::exit_with_status;
 use utils::{
     bold, cache_root, check_storage_budget, cyan, dim, extract_manifest_path, format_size,
     format_time_ago, green, has_explicit_target_dir_flag, is_non_building_subcommand,
-    status_header, warning_header, yellow,
+    normalize_args, status_header, warning_header, yellow,
 };
 
 fn main() {
@@ -31,7 +31,7 @@ fn main() {
     if raw_args.first().map(String::as_str) == Some("carpe") {
         raw_args.remove(0);
     }
-    let args = raw_args;
+    let args = normalize_args(raw_args);
 
     match args.first().map(String::as_str) {
         None | Some("-h") | Some("--help") => {
