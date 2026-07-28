@@ -19,8 +19,8 @@ use prune::run_prune;
 use repo::RepoIdentity;
 use slots::{collect_slots, select_slot};
 use utils::{
-    cache_root, exit_with_status, extract_manifest_path, format_size, format_time_ago,
-    has_explicit_target_dir_flag, is_non_building_subcommand,
+    cache_root, check_storage_budget, exit_with_status, extract_manifest_path, format_size,
+    format_time_ago, has_explicit_target_dir_flag, is_non_building_subcommand,
 };
 
 fn main() {
@@ -184,6 +184,7 @@ fn run_status() {
         );
     }
     println!("\nTotal pool size: {}", format_size(total_size));
+    check_storage_budget(&root);
 }
 
 fn run_info() {
@@ -231,6 +232,7 @@ fn run_info() {
             busy_count,
             format_size(total_size)
         );
+        check_storage_budget(&root);
     } else {
         println!("\nSlot Pool Stats: Cache directory does not exist yet.");
     }

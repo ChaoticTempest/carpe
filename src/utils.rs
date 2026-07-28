@@ -141,6 +141,38 @@ pub fn slot_mtime(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
+pub fn check_storage_budget(root: &Path) {
+    if !root.exists() {
+        return;
+    }
+
+    let max_gb: f64 = env::var("CARPE_MAX_STORAGE_GB")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10.0);
+
+    let max_bytes = (max_gb * 1024.0 * 1024.0 * 1024.0) as u64;
+
+    let mut total_bytes = 0u64;
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                total_bytes += dir_size(&path);
+            }
+        }
+    }
+
+    if total_bytes > max_bytes {
+        eprintln!(
+            "\ncarpe: warning: total cache size across all pools is {} (exceeds {:.1} GB storage budget)",
+            format_size(total_bytes),
+            max_gb
+        );
+        eprintln!("        run 'carpe prune -a' or 'carpe prune --lru 2' to reclaim disk space.");
+    }
+}
+
 pub fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -252,5 +284,17 @@ mod tests {
         assert!(!is_non_building_subcommand(&["build".into()]));
         assert!(!is_non_building_subcommand(&["test".into()]));
         assert!(!is_non_building_subcommand(&["check".into()]));
+    }
+
+    #[test]
+    fn test_check_storage_budget() {
+        let sys_temp = env::temp_dir();
+        let root = sys_temp.join(format!("carpe_budget_test_{}", test_rand_nonce()));
+        fs::create_dir_all(&root).unwrap();
+
+        // Should execute smoothly without crashing
+        check_storage_budget(&root);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
