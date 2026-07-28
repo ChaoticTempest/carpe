@@ -7,7 +7,7 @@ use dialoguer::{console, theme::ColorfulTheme, MultiSelect};
 use crate::lockfile;
 use crate::repo::RepoIdentity;
 use crate::slots::{collect_slots, SlotCandidate};
-use crate::utils::{cache_root, format_size, format_time_ago};
+use crate::utils::{cache_root, format_size, format_time_ago, is_ci_environment};
 
 pub fn run_prune(args: &[String]) {
     let mut interactive = false;
@@ -76,6 +76,11 @@ pub fn run_prune(args: &[String]) {
     }
 
     if interactive {
+        if is_ci_environment() || !console::Term::stdout().is_term() {
+            eprintln!("carpe: interactive prompt disabled in non-interactive / CI environment.");
+            eprintln!("       Use 'carpe prune --auto' or 'carpe prune -a' for automated pruning.");
+            return;
+        }
         run_interactive_prune(&mut slots, dry_run);
     } else if auto_prune {
         let max_gb: f64 = env::var("CARPE_MAX_STORAGE_GB")

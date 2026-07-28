@@ -84,6 +84,16 @@ pub fn is_non_building_subcommand(args: &[String]) -> bool {
     )
 }
 
+pub fn is_ci_environment() -> bool {
+    env::var("CI")
+        .map(|s| s == "true" || s == "1")
+        .unwrap_or(false)
+        || env::var("CARPE_CI")
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false)
+        || env::var_os("CONTINUOUS_INTEGRATION").is_some()
+}
+
 #[cfg(not(unix))]
 pub fn exit_with_status(status: std::process::ExitStatus) -> ! {
     std::process::exit(status.code().unwrap_or(1));
@@ -282,5 +292,12 @@ mod tests {
         check_storage_budget(&root);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_is_ci_environment() {
+        env::set_var("CARPE_CI", "true");
+        assert!(is_ci_environment());
+        env::remove_var("CARPE_CI");
     }
 }
