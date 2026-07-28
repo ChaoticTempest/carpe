@@ -123,25 +123,17 @@ impl SlotMeta {
 
     pub fn score(&self, current_git: &GitState, current_build: &CargoBuildState) -> u32 {
         let mut score = 0;
-        if let (Some(h1), Some(h2)) = (&self.head, &current_git.head) {
-            if h1 == h2 {
-                score += 100;
-            }
+        if matches!((&self.head, &current_git.head), (Some(h1), Some(h2)) if h1 == h2) {
+            score += 100;
         }
-        if let (Some(p1), Some(p2)) = (&self.profile, &current_build.profile) {
-            if p1 == p2 {
-                score += 40;
-            }
+        if matches!((&self.profile, &current_build.profile), (Some(p1), Some(p2)) if p1 == p2) {
+            score += 40;
         }
-        if let (Some(t1), Some(t2)) = (&self.target, &current_build.target) {
-            if t1 == t2 {
-                score += 40;
-            }
+        if matches!((&self.target, &current_build.target), (Some(t1), Some(t2)) if t1 == t2) {
+            score += 40;
         }
-        if let (Some(b1), Some(b2)) = (&self.branch, &current_git.branch) {
-            if b1 == b2 {
-                score += 30;
-            }
+        if matches!((&self.branch, &current_git.branch), (Some(b1), Some(b2)) if b1 == b2) {
+            score += 20;
         }
         score
     }
@@ -192,7 +184,7 @@ mod tests {
         assert_eq!(read_meta.branch, Some("feature-x".into()));
         assert_eq!(read_meta.profile, Some("release".into()));
         assert_eq!(read_meta.target, Some("wasm32-unknown-unknown".into()));
-        assert_eq!(read_meta.score(&g_state, &b_state), 210);
+        assert_eq!(read_meta.score(&g_state, &b_state), 200);
 
         let _ = fs::remove_dir_all(&slot_path);
     }

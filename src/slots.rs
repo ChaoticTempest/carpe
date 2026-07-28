@@ -28,48 +28,35 @@ pub fn select_slot(
     let git_state = GitState::detect(cwd);
     let build_state = CargoBuildState::parse(args);
 
-    let mut candidates = existing_slot_indices(root, &dir_name);
+    let candidates = existing_slot_indices(root, &dir_name);
 
-    if let Some(p) = preferred {
-        if let Some(pos) = candidates.iter().position(|&i| i == p) {
-            candidates.remove(pos);
-            candidates.insert(0, p);
-        }
-    }
-
-    // Rank non-preferred candidate slots by affinity score (commit/profile/target/branch match), then timestamp
-    if candidates.len() > 1 {
-        let start_idx = if preferred.is_some() { 1 } else { 0 };
-        if start_idx < candidates.len() {
-            let slice = &mut candidates[start_idx..];
-            let mut ranked: Vec<(usize, u32, u64)> = slice
-                .iter()
-                .map(|&idx| {
-                    let path = root.join(format!("{dir_name}-{idx}"));
-                    let meta = SlotMeta::read(&path).unwrap_or_default();
-                    let score = meta.score(&git_state, &build_state);
-                    (idx, score, meta.timestamp)
-                })
-                .collect();
-
-            ranked.sort_by(|a, b| {
-                b.1.cmp(&a.1)
-                    .then_with(|| b.2.cmp(&a.2))
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            for (i, (idx, _, _)) in ranked.into_iter().enumerate() {
-                slice[i] = idx;
+    // Rank candidate slots holistically: affinity score + preferred slot weight (75 points)
+    let mut ranked: Vec<(usize, u32, u64)> = candidates
+        .iter()
+        .map(|&idx| {
+            let path = root.join(format!("{dir_name}-{idx}"));
+            let meta = SlotMeta::read(&path).unwrap_or_default();
+            let mut score = meta.score(&git_state, &build_state);
+            if preferred == Some(idx) {
+                score += 75; // Baseline priority weight for this worktree's preferred slot
             }
-        }
-    }
+            (idx, score, meta.timestamp)
+        })
+        .collect();
+
+    ranked.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| a.0.cmp(&b.0))
+    });
 
     let mut chosen: Option<(usize, PathBuf, lockfile::Lock)> = None;
-    for idx in &candidates {
+    for &(idx, _, _) in &ranked {
         let slot_path = root.join(format!("{dir_name}-{idx}"));
         let lock_path = slot_path.join(".carpe-lock");
         match lockfile::try_lock(&lock_path) {
             Ok(Some(lock)) => {
-                chosen = Some((*idx, slot_path, lock));
+                chosen = Some((idx, slot_path, lock));
                 break;
             }
             Ok(None) => continue, // busy, try the next candidate
