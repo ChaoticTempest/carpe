@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::lockfile;
-use crate::meta::{GitState, SlotMeta};
+use crate::meta::{CargoBuildState, GitState, SlotMeta};
 use crate::repo::RepoIdentity;
 use crate::utils::{dir_size, latest_mtime};
 
@@ -21,10 +21,12 @@ pub fn select_slot(
     identity: &RepoIdentity,
     root: &Path,
     cwd: &Path,
+    args: &[String],
 ) -> (usize, PathBuf, lockfile::Lock) {
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
     let git_state = GitState::detect(cwd);
+    let build_state = CargoBuildState::parse(args);
 
     let mut candidates = existing_slot_indices(root, &dir_name);
 
@@ -35,7 +37,7 @@ pub fn select_slot(
         }
     }
 
-    // Rank non-preferred candidate slots by git affinity score (commit/branch match), then timestamp
+    // Rank non-preferred candidate slots by affinity score (commit/profile/target/branch match), then timestamp
     if candidates.len() > 1 {
         let start_idx = if preferred.is_some() { 1 } else { 0 };
         if start_idx < candidates.len() {
@@ -44,8 +46,8 @@ pub fn select_slot(
                 let path_b = root.join(format!("{dir_name}-{b}"));
                 let meta_a = SlotMeta::read(&path_a).unwrap_or_default();
                 let meta_b = SlotMeta::read(&path_b).unwrap_or_default();
-                let score_a = meta_a.score(&git_state);
-                let score_b = meta_b.score(&git_state);
+                let score_a = meta_a.score(&git_state, &build_state);
+                let score_b = meta_b.score(&git_state, &build_state);
 
                 score_b
                     .cmp(&score_a)
@@ -89,7 +91,7 @@ pub fn select_slot(
         identity.write_preferred_slot(slot_idx);
     }
 
-    SlotMeta::write(&slot_path, &git_state);
+    SlotMeta::write(&slot_path, &git_state, &build_state);
 
     (slot_idx, slot_path, lock)
 }
@@ -290,11 +292,11 @@ mod tests {
         let main_identity = RepoIdentity::detect(&main_repo);
         let wt_identity = RepoIdentity::detect(&wt_repo);
 
-        let (slot_a, path_a, lock_a) = select_slot(&main_identity, &cache_temp, &main_repo);
+        let (slot_a, path_a, lock_a) = select_slot(&main_identity, &cache_temp, &main_repo, &[]);
         assert_eq!(slot_a, 0, "First worktree build should allocate slot 0");
         assert!(path_a.ends_with(format!("{}-0", main_identity.pool_name())));
 
-        let (slot_b, path_b, lock_b) = select_slot(&wt_identity, &cache_temp, &wt_repo);
+        let (slot_b, path_b, lock_b) = select_slot(&wt_identity, &cache_temp, &wt_repo, &[]);
         assert_eq!(
             slot_b, 1,
             "Second worktree should fall back to slot 1 when slot 0 is locked"
@@ -306,13 +308,13 @@ mod tests {
         drop(lock_a);
         drop(lock_b);
 
-        let (slot_b2, _, lock_b2) = select_slot(&wt_identity, &cache_temp, &wt_repo);
+        let (slot_b2, _, lock_b2) = select_slot(&wt_identity, &cache_temp, &wt_repo, &[]);
         assert_eq!(
             slot_b2, 1,
             "Worktree B should reuse preferred slot 1 when free"
         );
 
-        let (slot_a2, _, lock_a2) = select_slot(&main_identity, &cache_temp, &main_repo);
+        let (slot_a2, _, lock_a2) = select_slot(&main_identity, &cache_temp, &main_repo, &[]);
         assert_eq!(
             slot_a2, 0,
             "Worktree A should reuse preferred slot 0 when free"

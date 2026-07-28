@@ -70,7 +70,7 @@ fn run_cargo(args: &[String]) {
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
 
-    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root, &cwd);
+    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root, &cwd, args);
 
     if let Some(existing_env) = env::var_os("CARGO_TARGET_DIR").filter(|s| !s.is_empty()) {
         eprintln!(
