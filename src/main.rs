@@ -24,7 +24,11 @@ use utils::{
 };
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut raw_args: Vec<String> = env::args().skip(1).collect();
+    if raw_args.first().map(String::as_str) == Some("carpe") {
+        raw_args.remove(0);
+    }
+    let args = raw_args;
 
     match args.first().map(String::as_str) {
         None | Some("-h") | Some("--help") => {
@@ -36,6 +40,9 @@ fn main() {
         }
         Some("status") => {
             run_status();
+        }
+        Some("info") => {
+            run_info();
         }
         Some("prune") => {
             run_prune(&args[1..]);
@@ -52,10 +59,14 @@ fn print_usage() {
     eprintln!("usage:");
     eprintln!("  carpe <cargo-args...>      run cargo with a coordinated CARGO_TARGET_DIR");
     eprintln!("  carpe status               show target-dir slots for the current repo");
+    eprintln!(
+        "  carpe info                 display detailed workspace, pool, and cache diagnostics"
+    );
     eprintln!("  carpe prune [options]      remove target-dir slots not held by any cargo process");
     eprintln!();
     eprintln!("prune options:");
     eprintln!("  -i, --interactive          choose interactively which slots to prune");
+    eprintln!("  -n, --dry-run              preview slots to prune without deleting files");
     eprintln!(
         "  --lru <num>                keep the <num> newest unlocked slots and prune older ones"
     );
@@ -173,4 +184,54 @@ fn run_status() {
         );
     }
     println!("\nTotal pool size: {}", format_size(total_size));
+}
+
+fn run_info() {
+    let cwd = env::current_dir().expect("carpe: cannot read current directory");
+    let identity = RepoIdentity::detect(&cwd);
+    let pool_name = identity.pool_name();
+    let root = cache_root();
+    let git_common = repo::git_common_dir(&cwd);
+    let git_dir = repo::git_dir(&cwd);
+
+    println!("Carpe System & Workspace Info:");
+    println!("------------------------------");
+    println!("CWD:            {}", cwd.display());
+    println!("Workspace Root: {}", identity.name_source.display());
+    println!("Pool Name:      {}", pool_name);
+    println!("Cache Root:     {}", root.display());
+    println!("Marker Path:    {}", identity.marker_path().display());
+    println!(
+        "Preferred Slot: {}",
+        identity
+            .read_preferred_slot()
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+
+    if let Some(common) = git_common {
+        println!("Git Common Dir: {}", common.display());
+    } else {
+        println!("Git Common Dir: (none - non-git cargo workspace)");
+    }
+    if let Some(gdir) = git_dir {
+        println!("Git Worktree:   {}", gdir.display());
+    }
+
+    if root.exists() {
+        let pref = identity.read_preferred_slot();
+        let slots = collect_slots(&root, Some(&pool_name), pref);
+        let free_count = slots.iter().filter(|s| !s.is_busy).count();
+        let busy_count = slots.iter().filter(|s| s.is_busy).count();
+        let total_size: u64 = slots.iter().map(|s| s.size_bytes).sum();
+        println!(
+            "\nSlot Pool Stats: {} total slots ({} free, {} busy), total size {}",
+            slots.len(),
+            free_count,
+            busy_count,
+            format_size(total_size)
+        );
+    } else {
+        println!("\nSlot Pool Stats: Cache directory does not exist yet.");
+    }
 }

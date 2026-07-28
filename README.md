@@ -7,8 +7,10 @@ in two worktrees at once instead of blocking on cargo's own build-dir lock.
 
 ```
 carpe <cargo-args...>      # e.g. `carpe build`, `carpe test --release`, `carpe check`
-carpe status                # show the slots for the current repo and whether they're busy
+carpe status                # show target-dir slots for the current repo and whether they're busy
+carpe info                  # display detailed system, workspace root, pool, and cache diagnostics
 carpe prune                 # clean up target slots for the current repo not held by any build
+carpe prune -n / --dry-run  # preview target slots to prune without deleting files
 carpe prune -i              # interactive menu to choose which target slots to delete
 carpe prune --lru <num>     # keep the <num> newest unlocked target slots and prune older ones
 carpe prune -a              # prune unlocked target slots across all repositories under ~/.cache/carpe

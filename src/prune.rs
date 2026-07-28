@@ -13,6 +13,7 @@ pub fn run_prune(args: &[String]) {
     let mut interactive = false;
     let mut lru: Option<usize> = None;
     let mut prune_all = false;
+    let mut dry_run = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -22,6 +23,9 @@ pub fn run_prune(args: &[String]) {
             }
             "-a" | "--all" => {
                 prune_all = true;
+            }
+            "-n" | "--dry-run" => {
+                dry_run = true;
             }
             "--lru" => {
                 if i + 1 < args.len() {
@@ -67,15 +71,15 @@ pub fn run_prune(args: &[String]) {
     }
 
     if interactive {
-        run_interactive_prune(&mut slots);
+        run_interactive_prune(&mut slots, dry_run);
     } else if let Some(keep_count) = lru {
-        run_lru_prune(&mut slots, keep_count);
+        run_lru_prune(&mut slots, keep_count, dry_run);
     } else {
-        run_default_prune(&slots);
+        run_default_prune(&slots, dry_run);
     }
 }
 
-pub fn run_interactive_prune(slots: &mut [SlotCandidate]) {
+pub fn run_interactive_prune(slots: &mut [SlotCandidate], dry_run: bool) {
     let mut choices: Vec<String> = Vec::new();
     let mut default_states: Vec<bool> = Vec::new();
 
@@ -125,19 +129,20 @@ pub fn run_interactive_prune(slots: &mut [SlotCandidate]) {
     let mut total_reclaimed = 0u64;
 
     for &idx in &selection {
-        if let Some(size) = try_prune_slot(&slots[idx]) {
+        if let Some(size) = try_prune_slot(&slots[idx], dry_run) {
             pruned_count += 1;
             total_reclaimed += size;
         }
     }
 
+    let prefix = if dry_run { "[dry-run] " } else { "" };
     println!(
-        "\nDone: pruned {pruned_count} slots, reclaimed {}.",
+        "\n{prefix}Done: pruned {pruned_count} slots, reclaimed {}.",
         format_size(total_reclaimed)
     );
 }
 
-pub fn run_lru_prune(slots: &mut [SlotCandidate], keep_num: usize) {
+pub fn run_lru_prune(slots: &mut [SlotCandidate], keep_num: usize, dry_run: bool) {
     let mut free_slots: Vec<&SlotCandidate> = slots.iter().filter(|s| !s.is_busy).collect();
 
     free_slots.sort_by(|a, b| {
@@ -159,36 +164,38 @@ pub fn run_lru_prune(slots: &mut [SlotCandidate], keep_num: usize) {
     let mut total_reclaimed = 0u64;
 
     for slot in to_prune {
-        if let Some(size) = try_prune_slot(slot) {
+        if let Some(size) = try_prune_slot(slot, dry_run) {
             pruned_count += 1;
             total_reclaimed += size;
         }
     }
 
+    let prefix = if dry_run { "[dry-run] " } else { "" };
     println!(
-        "LRU Prune: kept {keep_num} newest free slots, pruned {pruned_count} older slots, reclaimed {}.",
+        "{prefix}LRU Prune: kept {keep_num} newest free slots, pruned {pruned_count} older slots, reclaimed {}.",
         format_size(total_reclaimed)
     );
 }
 
-pub fn run_default_prune(slots: &[SlotCandidate]) {
+pub fn run_default_prune(slots: &[SlotCandidate], dry_run: bool) {
     let mut pruned_count = 0;
     let mut total_reclaimed = 0u64;
 
     for slot in slots.iter() {
-        if let Some(size) = try_prune_slot(slot) {
+        if let Some(size) = try_prune_slot(slot, dry_run) {
             pruned_count += 1;
             total_reclaimed += size;
         }
     }
 
+    let prefix = if dry_run { "[dry-run] " } else { "" };
     println!(
-        "Prune complete: removed {pruned_count} slots, reclaimed {}.",
+        "{prefix}Prune complete: removed {pruned_count} slots, reclaimed {}.",
         format_size(total_reclaimed)
     );
 }
 
-fn try_prune_slot(slot: &SlotCandidate) -> Option<u64> {
+fn try_prune_slot(slot: &SlotCandidate, dry_run: bool) -> Option<u64> {
     if slot.is_busy {
         println!("Skipping {} (currently locked/busy)", slot.name);
         return None;
@@ -198,7 +205,14 @@ fn try_prune_slot(slot: &SlotCandidate) -> Option<u64> {
     match lockfile::try_lock(&lock_path) {
         Ok(Some(_lock)) => {
             let size = slot.size_bytes;
-            if fs::remove_dir_all(&slot.path).is_ok() {
+            if dry_run {
+                println!(
+                    "[dry-run] Would prune {} ({})",
+                    slot.name,
+                    format_size(size)
+                );
+                Some(size)
+            } else if fs::remove_dir_all(&slot.path).is_ok() {
                 println!("Pruned {} ({})", slot.name, format_size(size));
                 Some(size)
             } else {
@@ -265,7 +279,7 @@ mod tests {
             },
         ];
 
-        run_lru_prune(&mut slots, 1);
+        run_lru_prune(&mut slots, 1, false);
 
         assert!(!path0.exists(), "Oldest slot 0 should be pruned");
         assert!(!path1.exists(), "Middle slot 1 should be pruned");
