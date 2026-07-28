@@ -16,7 +16,11 @@ path = "src/main.rs"
 # Locking is managed via fd-lock for cross-platform advisory file locks (flock/LockFileEx).
 
 [profile.release]
-opt-level = 2
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
 
 [dependencies]
 dialoguer = "0.12.0"
