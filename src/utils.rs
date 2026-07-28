@@ -84,6 +84,34 @@ pub fn is_non_building_subcommand(args: &[String]) -> bool {
     )
 }
 
+pub fn exit_with_status(status: std::process::ExitStatus) -> ! {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(code) = status.code() {
+            std::process::exit(code);
+        } else if let Some(signal) = status.signal() {
+            std::process::exit(128 + signal);
+        } else {
+            std::process::exit(1);
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+#[cfg(test)]
+pub fn test_rand_nonce() -> u64 {
+    use std::time::UNIX_EPOCH;
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
+}
+
 pub fn dir_size(path: &Path) -> u64 {
     let mut size = 0;
     if let Ok(entries) = fs::read_dir(path) {

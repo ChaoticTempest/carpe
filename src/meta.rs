@@ -143,14 +143,8 @@ impl SlotMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_rand_nonce;
     use std::env;
-
-    fn rand_nonce() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64
-    }
 
     #[test]
     fn test_cargo_build_state_parse() {
@@ -172,7 +166,7 @@ mod tests {
     #[test]
     fn test_slot_meta_read_write() {
         let sys_temp = env::temp_dir();
-        let slot_path = sys_temp.join(format!("carpe_meta_test_{}", rand_nonce()));
+        let slot_path = sys_temp.join(format!("carpe_meta_test_{}", test_rand_nonce()));
         fs::create_dir_all(&slot_path).unwrap();
 
         let g_state = GitState {

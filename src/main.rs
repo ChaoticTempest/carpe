@@ -19,8 +19,8 @@ use prune::run_prune;
 use repo::RepoIdentity;
 use slots::{collect_slots, select_slot};
 use utils::{
-    cache_root, extract_manifest_path, format_size, format_time_ago, has_explicit_target_dir_flag,
-    is_non_building_subcommand,
+    cache_root, exit_with_status, extract_manifest_path, format_size, format_time_ago,
+    has_explicit_target_dir_flag, is_non_building_subcommand,
 };
 
 fn main() {
@@ -71,22 +71,7 @@ fn run_cargo(args: &[String]) {
             .status()
             .expect("carpe: failed to spawn cargo (is it in PATH?)");
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            if let Some(code) = status.code() {
-                std::process::exit(code);
-            } else if let Some(signal) = status.signal() {
-                std::process::exit(128 + signal);
-            } else {
-                std::process::exit(1);
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            std::process::exit(status.code().unwrap_or(1));
-        }
+        exit_with_status(status);
     }
 
     let cwd = env::current_dir().expect("carpe: cannot read current directory");
@@ -133,22 +118,7 @@ fn run_cargo(args: &[String]) {
         .expect("carpe: failed to spawn cargo (is it in PATH?)");
 
     // _lock is still held here, for the whole duration of the cargo run.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(code) = status.code() {
-            std::process::exit(code);
-        } else if let Some(signal) = status.signal() {
-            std::process::exit(128 + signal);
-        } else {
-            std::process::exit(1);
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        std::process::exit(status.code().unwrap_or(1));
-    }
+    exit_with_status(status);
 }
 
 fn run_status() {

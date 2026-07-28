@@ -125,27 +125,9 @@ pub fn run_interactive_prune(slots: &mut [SlotCandidate]) {
     let mut total_reclaimed = 0u64;
 
     for &idx in &selection {
-        let slot = &slots[idx];
-        if slot.is_busy {
-            println!("Skipping {} (currently locked/busy)", slot.name);
-            continue;
-        }
-
-        let lock_path = slot.path.join(".carpe-lock");
-        match lockfile::try_lock(&lock_path) {
-            Ok(Some(_lock)) => {
-                let size = slot.size_bytes;
-                if fs::remove_dir_all(&slot.path).is_ok() {
-                    println!("Pruned {} ({})", slot.name, format_size(size));
-                    pruned_count += 1;
-                    total_reclaimed += size;
-                } else {
-                    eprintln!("Failed to remove {}", slot.path.display());
-                }
-            }
-            _ => {
-                println!("Skipping {} (busy)", slot.name);
-            }
+        if let Some(size) = try_prune_slot(&slots[idx]) {
+            pruned_count += 1;
+            total_reclaimed += size;
         }
     }
 
@@ -177,21 +159,9 @@ pub fn run_lru_prune(slots: &mut [SlotCandidate], keep_num: usize) {
     let mut total_reclaimed = 0u64;
 
     for slot in to_prune {
-        let lock_path = slot.path.join(".carpe-lock");
-        match lockfile::try_lock(&lock_path) {
-            Ok(Some(_lock)) => {
-                let size = slot.size_bytes;
-                if fs::remove_dir_all(&slot.path).is_ok() {
-                    println!("Pruned {} ({})", slot.name, format_size(size));
-                    pruned_count += 1;
-                    total_reclaimed += size;
-                } else {
-                    eprintln!("Failed to remove {}", slot.path.display());
-                }
-            }
-            _ => {
-                println!("Skipping {} (busy)", slot.name);
-            }
+        if let Some(size) = try_prune_slot(slot) {
+            pruned_count += 1;
+            total_reclaimed += size;
         }
     }
 
@@ -206,25 +176,9 @@ pub fn run_default_prune(slots: &[SlotCandidate]) {
     let mut total_reclaimed = 0u64;
 
     for slot in slots.iter() {
-        if slot.is_busy {
-            println!("Skipping {} (currently locked/busy)", slot.name);
-            continue;
-        }
-        let lock_path = slot.path.join(".carpe-lock");
-        match lockfile::try_lock(&lock_path) {
-            Ok(Some(_lock)) => {
-                let size = slot.size_bytes;
-                if fs::remove_dir_all(&slot.path).is_ok() {
-                    println!("Pruned {} ({})", slot.name, format_size(size));
-                    pruned_count += 1;
-                    total_reclaimed += size;
-                } else {
-                    eprintln!("Failed to remove {}", slot.path.display());
-                }
-            }
-            _ => {
-                println!("Skipping {} (busy)", slot.name);
-            }
+        if let Some(size) = try_prune_slot(slot) {
+            pruned_count += 1;
+            total_reclaimed += size;
         }
     }
 
@@ -234,22 +188,40 @@ pub fn run_default_prune(slots: &[SlotCandidate]) {
     );
 }
 
+fn try_prune_slot(slot: &SlotCandidate) -> Option<u64> {
+    if slot.is_busy {
+        println!("Skipping {} (currently locked/busy)", slot.name);
+        return None;
+    }
+
+    let lock_path = slot.path.join(".carpe-lock");
+    match lockfile::try_lock(&lock_path) {
+        Ok(Some(_lock)) => {
+            let size = slot.size_bytes;
+            if fs::remove_dir_all(&slot.path).is_ok() {
+                println!("Pruned {} ({})", slot.name, format_size(size));
+                Some(size)
+            } else {
+                eprintln!("Failed to remove {}", slot.path.display());
+                None
+            }
+        }
+        _ => {
+            println!("Skipping {} (busy)", slot.name);
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn rand_nonce() -> u64 {
-        use std::time::UNIX_EPOCH;
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64
-    }
+    use crate::utils::test_rand_nonce;
 
     #[test]
     fn test_lru_pruning_selection() {
         let sys_temp = env::temp_dir();
-        let test_dir = sys_temp.join(format!("carpe_lru_test_{}", rand_nonce()));
+        let test_dir = sys_temp.join(format!("carpe_lru_test_{}", test_rand_nonce()));
         fs::create_dir_all(&test_dir).unwrap();
 
         let pool_name = "testrepo-12345678";

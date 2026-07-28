@@ -144,19 +144,12 @@ pub fn find_cargo_workspace_root(cwd: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn rand_nonce() -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64
-    }
+    use crate::utils::test_rand_nonce;
 
     #[test]
     fn test_non_git_cargo_workspace_root_resolution() {
         let sys_temp = std::env::temp_dir();
-        let root = sys_temp.join(format!("carpe_ws_test_{}", rand_nonce()));
+        let root = sys_temp.join(format!("carpe_ws_test_{}", test_rand_nonce()));
         let workspace_dir = root.join("my_workspace");
         let subcrate_dir = workspace_dir.join("crates").join("subcrate");
 

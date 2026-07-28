@@ -176,20 +176,13 @@ pub fn collect_slots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_rand_nonce;
     use std::env;
     use std::process::Command;
 
-    fn rand_nonce() -> u64 {
-        use std::time::UNIX_EPOCH;
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64
-    }
-
     fn setup_test_repo() -> Option<(PathBuf, PathBuf, PathBuf)> {
         let sys_temp = env::temp_dir();
-        let test_run_id = format!("carpe_test_{}_{}", std::process::id(), rand_nonce());
+        let test_run_id = format!("carpe_test_{}_{}", std::process::id(), test_rand_nonce());
         let root_dir = sys_temp.join(test_run_id);
         fs::create_dir_all(&root_dir).ok()?;
 
