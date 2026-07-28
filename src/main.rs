@@ -18,7 +18,10 @@ use std::process::Command;
 use prune::run_prune;
 use repo::RepoIdentity;
 use slots::{collect_slots, select_slot};
-use utils::{cache_root, format_size, format_time_ago, has_explicit_target_dir_flag};
+use utils::{
+    cache_root, extract_manifest_path, format_size, format_time_ago, has_explicit_target_dir_flag,
+    is_non_building_subcommand,
+};
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -62,19 +65,48 @@ fn print_usage() {
 }
 
 fn run_cargo(args: &[String]) {
+    if is_non_building_subcommand(args) {
+        let status = Command::new("cargo")
+            .args(args)
+            .status()
+            .expect("carpe: failed to spawn cargo (is it in PATH?)");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(code) = status.code() {
+                std::process::exit(code);
+            } else if let Some(signal) = status.signal() {
+                std::process::exit(128 + signal);
+            } else {
+                std::process::exit(1);
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+    }
+
     let cwd = env::current_dir().expect("carpe: cannot read current directory");
-    let identity = RepoIdentity::detect(&cwd);
+    let base_dir = extract_manifest_path(args).unwrap_or_else(|| cwd.clone());
+    let identity = RepoIdentity::detect(&base_dir);
     let root = cache_root();
     fs::create_dir_all(&root).expect("carpe: cannot create ~/.cache/carpe");
 
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
 
-    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root, &cwd, args);
+    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root, &base_dir, args);
 
-    if let Some(existing_env) = env::var_os("CARGO_TARGET_DIR").filter(|s| !s.is_empty()) {
+    let env_target_dir = env::var_os("CARGO_TARGET_DIR")
+        .or_else(|| env::var_os("CARGO_BUILD_TARGET_DIR"))
+        .filter(|s| !s.is_empty());
+
+    if let Some(existing_env) = env_target_dir {
         eprintln!(
-            "carpe: warning: CARGO_TARGET_DIR is set in environment ({}), overriding with carpe slot {}",
+            "carpe: warning: target directory is set in environment ({}), overriding with carpe slot {}",
             existing_env.to_string_lossy(),
             slot_path.display()
         );

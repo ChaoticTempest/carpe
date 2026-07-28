@@ -42,6 +42,48 @@ pub fn has_explicit_target_dir_flag(args: &[String]) -> bool {
     false
 }
 
+pub fn extract_manifest_path(args: &[String]) -> Option<PathBuf> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--manifest-path" {
+            if i + 1 < args.len() {
+                let p = PathBuf::from(&args[i + 1]);
+                return p.parent().map(Path::to_path_buf);
+            }
+        } else if let Some(path_str) = args[i].strip_prefix("--manifest-path=") {
+            let p = PathBuf::from(path_str);
+            return p.parent().map(Path::to_path_buf);
+        }
+        i += 1;
+    }
+    None
+}
+
+pub fn is_non_building_subcommand(args: &[String]) -> bool {
+    let Some(first) = args.first() else {
+        return false;
+    };
+    let cmd = first.as_str();
+    matches!(
+        cmd,
+        "fmt"
+            | "add"
+            | "remove"
+            | "rm"
+            | "metadata"
+            | "tree"
+            | "new"
+            | "init"
+            | "publish"
+            | "search"
+            | "login"
+            | "logout"
+            | "owner"
+            | "vendor"
+            | "yank"
+    )
+}
+
 pub fn dir_size(path: &Path) -> u64 {
     let mut size = 0;
     if let Ok(entries) = fs::read_dir(path) {
@@ -164,5 +206,35 @@ mod tests {
             "build".into(),
             "--release".into()
         ]));
+    }
+
+    #[test]
+    fn test_extract_manifest_path() {
+        let p1 = extract_manifest_path(&[
+            "build".into(),
+            "--manifest-path".into(),
+            "/my/project/Cargo.toml".into(),
+        ]);
+        assert_eq!(p1, Some(PathBuf::from("/my/project")));
+
+        let p2 = extract_manifest_path(&[
+            "build".into(),
+            "--manifest-path=/my/project/Cargo.toml".into(),
+        ]);
+        assert_eq!(p2, Some(PathBuf::from("/my/project")));
+
+        let p3 = extract_manifest_path(&["build".into(), "--release".into()]);
+        assert_eq!(p3, None);
+    }
+
+    #[test]
+    fn test_is_non_building_subcommand() {
+        assert!(is_non_building_subcommand(&["fmt".into()]));
+        assert!(is_non_building_subcommand(&["add".into(), "serde".into()]));
+        assert!(is_non_building_subcommand(&["metadata".into()]));
+        assert!(is_non_building_subcommand(&["tree".into()]));
+        assert!(!is_non_building_subcommand(&["build".into()]));
+        assert!(!is_non_building_subcommand(&["test".into()]));
+        assert!(!is_non_building_subcommand(&["check".into()]));
     }
 }
