@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use crate::lockfile;
 use crate::meta::{CargoBuildState, GitState, SlotMeta};
 use crate::repo::RepoIdentity;
-use crate::utils::{dir_size, latest_mtime};
+use crate::utils::{dir_size, slot_mtime};
 
 #[derive(Debug, Clone)]
 pub struct SlotCandidate {
@@ -147,7 +147,7 @@ pub fn collect_slots(
         let is_busy = !matches!(lockfile::try_lock(&lock_path), Ok(Some(_)));
 
         let size = dir_size(&path);
-        let mtime = latest_mtime(&path);
+        let mtime = slot_mtime(&path);
 
         let is_preferred = if let Some(pool) = filter_pool {
             if let Some(pref_idx) = preferred {

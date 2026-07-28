@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn canonicalize_best_effort(p: &Path) -> PathBuf {
     fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
@@ -127,30 +127,18 @@ pub fn dir_size(path: &Path) -> u64 {
     size
 }
 
-pub fn latest_mtime(path: &Path) -> Option<SystemTime> {
-    let mut max_time: Option<SystemTime> = None;
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if let Ok(meta) = p.metadata() {
-                if let Ok(t) = meta.modified() {
-                    max_time = match max_time {
-                        Some(current) => Some(current.max(t)),
-                        None => Some(t),
-                    };
-                }
-            }
-            if p.is_dir() {
-                if let Some(child_max) = latest_mtime(&p) {
-                    max_time = match max_time {
-                        Some(current) => Some(current.max(child_max)),
-                        None => Some(child_max),
-                    };
+pub fn slot_mtime(path: &Path) -> Option<SystemTime> {
+    let meta_path = path.join(".carpe-meta");
+    if let Ok(content) = fs::read_to_string(&meta_path) {
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("timestamp=") {
+                if let Ok(ts) = val.parse::<u64>() {
+                    return Some(UNIX_EPOCH + std::time::Duration::from_secs(ts));
                 }
             }
         }
     }
-    max_time
+    fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 pub fn format_size(bytes: u64) -> String {

@@ -12,9 +12,16 @@ pub struct GitState {
 
 impl GitState {
     pub fn detect(cwd: &Path) -> GitState {
-        let head = run_git(cwd, &["rev-parse", "HEAD"]);
-        let branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD");
-        GitState { head, branch }
+        if let Some(out) = run_git(cwd, &["rev-parse", "HEAD", "--abbrev-ref", "HEAD"]) {
+            let mut lines = out.lines();
+            let head = lines.next().map(String::from);
+            let branch = lines.next().map(String::from).filter(|b| b != "HEAD");
+            return GitState { head, branch };
+        }
+        GitState {
+            head: None,
+            branch: None,
+        }
     }
 }
 

@@ -23,7 +23,7 @@ pub struct RepoIdentity {
 
 impl RepoIdentity {
     pub fn detect(cwd: &Path) -> RepoIdentity {
-        if let (Some(common_dir), Some(worktree_git_dir)) = (git_common_dir(cwd), git_dir(cwd)) {
+        if let Some((common_dir, worktree_git_dir)) = git_dirs(cwd) {
             let common_dir = canonicalize_best_effort(&common_dir);
             let name_source = common_dir
                 .parent()
@@ -82,14 +82,20 @@ impl RepoIdentity {
     }
 }
 
+pub fn git_dirs(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
+    let out = run_git(cwd, &["rev-parse", "--git-common-dir", "--git-dir"])?;
+    let mut lines = out.lines();
+    let common_raw = lines.next()?;
+    let worktree_raw = lines.next()?;
+    Some((resolve(cwd, common_raw), resolve(cwd, worktree_raw)))
+}
+
 pub fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
-    let out = run_git(cwd, &["rev-parse", "--git-common-dir"])?;
-    Some(resolve(cwd, &out))
+    git_dirs(cwd).map(|(common, _)| common)
 }
 
 pub fn git_dir(cwd: &Path) -> Option<PathBuf> {
-    let out = run_git(cwd, &["rev-parse", "--git-dir"])?;
-    Some(resolve(cwd, &out))
+    git_dirs(cwd).map(|(_, worktree)| worktree)
 }
 
 pub fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
