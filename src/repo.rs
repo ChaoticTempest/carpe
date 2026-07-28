@@ -36,13 +36,14 @@ impl RepoIdentity {
                 marker_dir,
             }
         } else {
-            let canon = canonicalize_best_effort(cwd);
+            let root =
+                find_cargo_workspace_root(cwd).unwrap_or_else(|| canonicalize_best_effort(cwd));
             let marker_dir = cache_root()
                 .join("state")
-                .join(short_hash(&canon.to_string_lossy()));
+                .join(short_hash(&root.to_string_lossy()));
             RepoIdentity {
-                name_source: canon.clone(),
-                repo_identity: canon,
+                name_source: root.clone(),
+                repo_identity: root,
                 marker_dir,
             }
         }
@@ -111,5 +112,77 @@ fn resolve(cwd: &Path, raw: &str) -> PathBuf {
         p
     } else {
         cwd.join(p)
+    }
+}
+
+pub fn find_cargo_workspace_root(cwd: &Path) -> Option<PathBuf> {
+    let mut current = canonicalize_best_effort(cwd);
+    let mut top_root: Option<PathBuf> = None;
+
+    loop {
+        let manifest = current.join("Cargo.toml");
+        if manifest.is_file() {
+            if top_root.is_none() {
+                top_root = Some(current.clone());
+            }
+
+            if let Ok(content) = fs::read_to_string(&manifest) {
+                if content.contains("[workspace]") {
+                    top_root = Some(current.clone());
+                }
+            }
+        }
+
+        if !current.pop() {
+            break;
+        }
+    }
+
+    top_root
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rand_nonce() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+    }
+
+    #[test]
+    fn test_non_git_cargo_workspace_root_resolution() {
+        let sys_temp = std::env::temp_dir();
+        let root = sys_temp.join(format!("carpe_ws_test_{}", rand_nonce()));
+        let workspace_dir = root.join("my_workspace");
+        let subcrate_dir = workspace_dir.join("crates").join("subcrate");
+
+        fs::create_dir_all(&subcrate_dir).unwrap();
+
+        fs::write(
+            workspace_dir.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]",
+        )
+        .unwrap();
+
+        fs::write(
+            subcrate_dir.join("Cargo.toml"),
+            "[package]\nname = \"subcrate\"\nversion = \"0.1.0\"",
+        )
+        .unwrap();
+
+        let identity_root = RepoIdentity::detect(&workspace_dir);
+        let identity_subcrate = RepoIdentity::detect(&subcrate_dir);
+
+        assert_eq!(
+            identity_root.pool_name(),
+            identity_subcrate.pool_name(),
+            "Non-git subcrate and workspace root must resolve to the exact same pool name"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
