@@ -84,23 +84,9 @@ pub fn is_non_building_subcommand(args: &[String]) -> bool {
     )
 }
 
+#[cfg(not(unix))]
 pub fn exit_with_status(status: std::process::ExitStatus) -> ! {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(code) = status.code() {
-            std::process::exit(code);
-        } else if let Some(signal) = status.signal() {
-            std::process::exit(128 + signal);
-        } else {
-            std::process::exit(1);
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        std::process::exit(status.code().unwrap_or(1));
-    }
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 #[cfg(test)]

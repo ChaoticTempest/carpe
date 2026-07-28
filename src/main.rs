@@ -18,9 +18,11 @@ use std::process::Command;
 use prune::run_prune;
 use repo::RepoIdentity;
 use slots::{collect_slots, select_slot};
+#[cfg(not(unix))]
+use utils::exit_with_status;
 use utils::{
-    cache_root, check_storage_budget, exit_with_status, extract_manifest_path, format_size,
-    format_time_ago, has_explicit_target_dir_flag, is_non_building_subcommand,
+    cache_root, check_storage_budget, extract_manifest_path, format_size, format_time_ago,
+    has_explicit_target_dir_flag, is_non_building_subcommand,
 };
 
 fn main() {
@@ -77,12 +79,9 @@ fn print_usage() {
 
 fn run_cargo(args: &[String]) {
     if is_non_building_subcommand(args) {
-        let status = Command::new("cargo")
-            .args(args)
-            .status()
-            .expect("carpe: failed to spawn cargo (is it in PATH?)");
-
-        exit_with_status(status);
+        let mut cmd = Command::new("cargo");
+        cmd.args(args);
+        spawn_or_exec_cargo(cmd);
     }
 
     let cwd = env::current_dir().expect("carpe: cannot read current directory");
@@ -122,14 +121,27 @@ fn run_cargo(args: &[String]) {
         _ => eprintln!("carpe: using {}", slot_path.display()),
     }
 
-    let status = Command::new("cargo")
-        .args(args)
-        .env("CARGO_TARGET_DIR", &slot_path)
-        .status()
-        .expect("carpe: failed to spawn cargo (is it in PATH?)");
+    let mut cmd = Command::new("cargo");
+    cmd.args(args).env("CARGO_TARGET_DIR", &slot_path);
+    spawn_or_exec_cargo(cmd);
+}
 
-    // _lock is still held here, for the whole duration of the cargo run.
-    exit_with_status(status);
+fn spawn_or_exec_cargo(mut cmd: Command) -> ! {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = cmd.exec();
+        eprintln!("carpe: failed to exec cargo: {err}");
+        std::process::exit(1);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = cmd
+            .status()
+            .expect("carpe: failed to spawn cargo (is it in PATH?)");
+        exit_with_status(status);
+    }
 }
 
 fn run_status() {
