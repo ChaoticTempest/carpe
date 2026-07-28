@@ -135,7 +135,7 @@ pub fn check_storage_budget(root: &Path) {
     let max_gb: f64 = env::var("CARPE_MAX_STORAGE_GB")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(10.0);
+        .unwrap_or(128.0);
 
     let max_bytes = (max_gb * 1024.0 * 1024.0 * 1024.0) as u64;
 

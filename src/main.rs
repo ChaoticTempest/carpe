@@ -70,6 +70,9 @@ fn print_usage() {
     eprintln!("  -i, --interactive          choose interactively which slots to prune");
     eprintln!("  -n, --dry-run              preview slots to prune without deleting files");
     eprintln!(
+        "  --auto                     prune oldest slots until total size drops under budget"
+    );
+    eprintln!(
         "  --lru <num>                keep the <num> newest unlocked slots and prune older ones"
     );
     eprintln!(
