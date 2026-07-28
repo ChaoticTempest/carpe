@@ -21,8 +21,9 @@ use slots::{collect_slots, select_slot};
 #[cfg(not(unix))]
 use utils::exit_with_status;
 use utils::{
-    cache_root, check_storage_budget, extract_manifest_path, format_size, format_time_ago,
-    has_explicit_target_dir_flag, is_non_building_subcommand,
+    bold, cache_root, check_storage_budget, cyan, dim, extract_manifest_path, format_size,
+    format_time_ago, green, has_explicit_target_dir_flag, is_non_building_subcommand,
+    status_header, warning_header, yellow,
 };
 
 fn main() {
@@ -104,7 +105,8 @@ fn run_cargo(args: &[String]) {
 
     if let Some(existing_env) = env_target_dir {
         eprintln!(
-            "carpe: warning: target directory is set in environment ({}), overriding with carpe slot {}",
+            "{} target directory is set in environment ({}), overriding with carpe slot {}",
+            warning_header("Warning"),
             existing_env.to_string_lossy(),
             slot_path.display()
         );
@@ -112,16 +114,23 @@ fn run_cargo(args: &[String]) {
 
     if has_explicit_target_dir_flag(args) {
         eprintln!(
-            "carpe: warning: explicit --target-dir flag passed in arguments; Cargo CLI flag will take precedence over carpe slot {}",
+            "{} explicit --target-dir flag passed in arguments; Cargo CLI flag will take precedence over carpe slot {}",
+            warning_header("Warning"),
             slot_path.display()
         );
     }
 
     match preferred {
         Some(p) if p != slot_idx => eprintln!(
-            "carpe: preferred slot {dir_name}-{p} is busy, using {dir_name}-{slot_idx} instead (parallel build)"
+            "{} preferred slot {dir_name}-{p} is busy, using {} instead (parallel build)",
+            status_header("Carpe"),
+            cyan(format!("{dir_name}-{slot_idx}"))
         ),
-        _ => eprintln!("carpe: using {}", slot_path.display()),
+        _ => eprintln!(
+            "{} using {}",
+            status_header("Carpe"),
+            cyan(slot_path.display())
+        ),
     }
 
     let mut cmd = Command::new("cargo");
@@ -152,14 +161,14 @@ fn run_status() {
     let identity = RepoIdentity::detect(&cwd);
     let pool_name = identity.pool_name();
 
-    println!("Pool:      {pool_name}");
-    println!("Marker:    {}", identity.marker_path().display());
+    println!("Pool:      {}", cyan(&pool_name));
+    println!("Marker:    {}", dim(identity.marker_path().display()));
     println!(
         "Preferred: {}",
         identity
             .read_preferred_slot()
-            .map(|i| i.to_string())
-            .unwrap_or_else(|| "none".to_string())
+            .map(green)
+            .unwrap_or_else(|| dim("none"))
     );
 
     let root = cache_root();
@@ -180,25 +189,23 @@ fn run_status() {
     let mut total_size = 0u64;
     for s in &slots {
         total_size += s.size_bytes;
-        let mut status_flags = Vec::new();
-        if s.is_busy {
-            status_flags.push("LOCKED/BUSY");
+        let status_str = if s.is_busy {
+            yellow("LOCKED/BUSY")
+        } else if s.is_preferred {
+            green("free, preferred")
         } else {
-            status_flags.push("free");
-        }
-        if s.is_preferred {
-            status_flags.push("preferred");
-        }
+            green("free")
+        };
 
         println!(
             "  {:<25} {:<10} [{}] (modified: {})",
-            s.name,
+            cyan(&s.name),
             format_size(s.size_bytes),
-            status_flags.join(", "),
-            format_time_ago(s.mtime)
+            status_str,
+            dim(format_time_ago(s.mtime))
         );
     }
-    println!("\nTotal pool size: {}", format_size(total_size));
+    println!("\nTotal pool size: {}", bold(format_size(total_size)));
     check_storage_budget(&root);
 }
 
@@ -210,28 +217,28 @@ fn run_info() {
     let git_common = repo::git_common_dir(&cwd);
     let git_dir = repo::git_dir(&cwd);
 
-    println!("Carpe System & Workspace Info:");
-    println!("------------------------------");
+    println!("{}", bold("Carpe System & Workspace Info:"));
+    println!("{}", dim("------------------------------"));
     println!("CWD:            {}", cwd.display());
     println!("Workspace Root: {}", identity.name_source.display());
-    println!("Pool Name:      {}", pool_name);
-    println!("Cache Root:     {}", root.display());
-    println!("Marker Path:    {}", identity.marker_path().display());
+    println!("Pool Name:      {}", cyan(&pool_name));
+    println!("Cache Root:     {}", dim(root.display()));
+    println!("Marker Path:    {}", dim(identity.marker_path().display()));
     println!(
         "Preferred Slot: {}",
         identity
             .read_preferred_slot()
-            .map(|i| i.to_string())
-            .unwrap_or_else(|| "none".to_string())
+            .map(green)
+            .unwrap_or_else(|| dim("none"))
     );
 
     if let Some(common) = git_common {
-        println!("Git Common Dir: {}", common.display());
+        println!("Git Common Dir: {}", dim(common.display()));
     } else {
         println!("Git Common Dir: (none - non-git cargo workspace)");
     }
     if let Some(gdir) = git_dir {
-        println!("Git Worktree:   {}", gdir.display());
+        println!("Git Worktree:   {}", dim(gdir.display()));
     }
 
     if root.exists() {
@@ -241,11 +248,11 @@ fn run_info() {
         let busy_count = slots.iter().filter(|s| s.is_busy).count();
         let total_size: u64 = slots.iter().map(|s| s.size_bytes).sum();
         println!(
-            "\nSlot Pool Stats: {} total slots ({} free, {} busy), total size {}",
+            "\nSlot Pool Stats: {} total slots ({}, {}), total size {}",
             slots.len(),
-            free_count,
-            busy_count,
-            format_size(total_size)
+            green(format!("{free_count} free")),
+            yellow(format!("{busy_count} busy")),
+            bold(format_size(total_size))
         );
         check_storage_budget(&root);
     } else {

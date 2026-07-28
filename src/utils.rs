@@ -5,6 +5,36 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use dialoguer::console::style;
+
+pub fn cyan(s: impl std::fmt::Display) -> String {
+    style(s).cyan().to_string()
+}
+
+pub fn green(s: impl std::fmt::Display) -> String {
+    style(s).green().to_string()
+}
+
+pub fn yellow(s: impl std::fmt::Display) -> String {
+    style(s).yellow().to_string()
+}
+
+pub fn bold(s: impl std::fmt::Display) -> String {
+    style(s).bold().to_string()
+}
+
+pub fn dim(s: impl std::fmt::Display) -> String {
+    style(s).dim().to_string()
+}
+
+pub fn status_header(action: &str) -> String {
+    style(format!("{action:>12}")).green().bold().to_string()
+}
+
+pub fn warning_header(action: &str) -> String {
+    style(format!("{action:>12}")).yellow().bold().to_string()
+}
+
 pub fn canonicalize_best_effort(p: &Path) -> PathBuf {
     fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
@@ -161,9 +191,12 @@ pub fn check_storage_budget(root: &Path) {
 
     if total_bytes > max_bytes {
         eprintln!(
-            "\ncarpe: warning: total cache size across all pools is {} (exceeds {:.1} GB storage budget)",
-            format_size(total_bytes),
-            max_gb
+            "\n{}",
+            yellow(format!(
+                "carpe: warning: total cache size across all pools is {} (exceeds {:.1} GB storage budget)",
+                format_size(total_bytes),
+                max_gb
+            ))
         );
         eprintln!("        run 'carpe prune -a' or 'carpe prune --lru 2' to reclaim disk space.");
     }

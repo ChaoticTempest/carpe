@@ -7,7 +7,9 @@ use dialoguer::{console, theme::ColorfulTheme, MultiSelect};
 use crate::lockfile;
 use crate::repo::RepoIdentity;
 use crate::slots::{collect_slots, SlotCandidate};
-use crate::utils::{cache_root, format_size, format_time_ago, is_ci_environment};
+use crate::utils::{
+    cache_root, cyan, format_size, format_time_ago, green, is_ci_environment, yellow,
+};
 
 pub fn run_prune(args: &[String]) {
     let mut interactive = false;
@@ -256,7 +258,7 @@ pub fn run_default_prune(slots: &[SlotCandidate], dry_run: bool) {
 
 fn try_prune_slot(slot: &SlotCandidate, dry_run: bool) -> Option<u64> {
     if slot.is_busy {
-        println!("Skipping {} (currently locked/busy)", slot.name);
+        println!("Skipping {} (currently locked/busy)", cyan(&slot.name));
         return None;
     }
 
@@ -266,13 +268,16 @@ fn try_prune_slot(slot: &SlotCandidate, dry_run: bool) -> Option<u64> {
             let size = slot.size_bytes;
             if dry_run {
                 println!(
-                    "[dry-run] Would prune {} ({})",
-                    slot.name,
-                    format_size(size)
+                    "{}",
+                    yellow(format!(
+                        "[dry-run] Would prune {} ({})",
+                        cyan(&slot.name),
+                        format_size(size)
+                    ))
                 );
                 Some(size)
             } else if fs::remove_dir_all(&slot.path).is_ok() {
-                println!("Pruned {} ({})", slot.name, format_size(size));
+                println!("Pruned {} ({})", green(&slot.name), format_size(size));
                 Some(size)
             } else {
                 eprintln!("Failed to remove {}", slot.path.display());
@@ -280,7 +285,7 @@ fn try_prune_slot(slot: &SlotCandidate, dry_run: bool) -> Option<u64> {
             }
         }
         _ => {
-            println!("Skipping {} (busy)", slot.name);
+            println!("Skipping {} (busy)", cyan(&slot.name));
             None
         }
     }
