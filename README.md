@@ -20,9 +20,10 @@ exec'ing `cargo`.
 
 ## How slot selection works
 
-1. **Identify the repo.** `git rev-parse --git-common-dir` gives the same
+1. **Identify the repo or workspace.** `git rev-parse --git-common-dir` gives the same
    answer in every worktree of a given repo, so it's used as the pool's
-   identity — that's the "detect if we're in the same worktree or not" part.
+   identity. Outside of Git repositories, `carpe` automatically traverses parent directories
+   to locate the top-level Cargo workspace root (`Cargo.toml`).
 2. **Identify this worktree.** `git rev-parse --git-dir` gives a path that's
    *different per worktree* (each linked worktree has its own private git
    dir under `<main>/.git/worktrees/<name>`). That's where carpe stores a
@@ -30,39 +31,30 @@ exec'ing `cargo`.
    nothing in `~/.cache` needs to track worktrees itself, and when you
    `git worktree remove` a worktree, its marker disappears with it. No
    central state file, no stale entries to garbage-collect.
-3. **Prefer the same slot as last time**, because reusing a target dir is
-   what makes incremental compilation actually pay off. Before using it,
-   carpe takes a non-blocking exclusive lock on `<slot>/.carpe-lock`.
-   - Lock acquired → use this slot, done.
-   - Lock contended (another `carpe`/build already running against it,
-     from this worktree or another) → try the next existing slot for this
-     repo, in order.
-   - All existing slots busy → create a new one (`<pool>-N+1`) and use that.
-     This is what lets two worktrees actually build in parallel instead of
-     one blocking behind the other.
-4. The chosen slot's lock is held by the `carpe` process for the entire
-   `cargo` invocation, then released automatically when `carpe` exits (the
-   OS releases `flock`/`LockFileEx` locks on process exit or crash, so
-   there's never a stale lock file to clean up by hand).
+3. **Smart Affinity Scoring.** Reusing a target dir is what makes incremental compilation pay off.
+   When searching free slots, `carpe` scores slots using a multi-dimensional affinity algorithm:
+   - **Preferred Worktree Slot**: Selected immediately if free.
+   - **Git Commit Match (`head`)**: +100 points
+   - **Cargo Profile Match (`debug`/`release`/custom)**: +40 points
+   - **Target Triple Match (`--target`)**: +40 points
+   - **Git Branch Match (`branch`)**: +30 points
+   - **Fallback**: If all candidate slots are locked, a new slot (`<pool>-N+1`) is created.
+4. **Advisory Locking.** The chosen slot's lock is held by the `carpe` process for the entire
+   `cargo` invocation using [`fd-lock`](https://crates.io/crates/fd-lock) (`flock` on Unix, `LockFileEx` on Windows), then released automatically on exit.
 
-### Why not just check cargo's own `.cargo-lock`?
+### Environment & Flag Warnings
 
-Cargo already takes a lock on its target directory (that's what "Blocking
-waiting for file lock on build directory" is). It would be simpler for
-carpe to just check that lock rather than keeping one of its own — but that
-file actually lives *inside* the profile subdirectory
-(`target/debug/.cargo-lock`, `target/release/.cargo-lock`, a target-triple
-subdir for cross builds, etc.), which cargo's own docs describe as an
-"internal implementation detail... we can change this if needed." It also
-won't exist yet on a brand-new slot before the first build. Rather than
-parse cargo args to guess the right profile path and hope the layout
-doesn't shift under us, carpe just takes its own lock at the slot root — same
-underlying mechanism (`flock` / `LockFileEx`), fully under carpe's control.
+- If `$CARGO_TARGET_DIR` is set in your environment, `carpe` prints a warning and overrides it with the selected slot.
+- If `--target-dir` is explicitly passed in Cargo CLI arguments, `carpe` warns that Cargo's explicit CLI flag will take precedence over the slot.
 
 ### Naming
 
-Slots live at `~/.cache/carpe/<pool>-<n>`, e.g. `~/.cache/carpe/myrepo-a1b2c3d4-0`.
-`<pool>` is `<basename-of-repo>-<8-hex-char-hash-of-the-git-common-dir-path>` —
+Slots live under standard platform cache directories via [`dirs`](https://crates.io/crates/dirs):
+- **Linux/BSD**: `~/.cache/carpe/<pool>-<n>`
+- **macOS**: `~/Library/Caches/carpe/<pool>-<n>` (or `$XDG_CACHE_HOME/carpe/`)
+- **Windows**: `%LOCALAPPDATA%\carpe\<pool>-<n>`
+
+`<pool>` is `<basename-of-repo>-<8-hex-char-hash-of-the-identity-path>` —
 the hash exists purely to keep two unrelated repos that happen to share a
 directory name (very common: `api`, `server`, `worker`, ...) from colliding.
 
@@ -89,36 +81,36 @@ carpe: using /home/you/.cache/carpe/myrepo-a1b2c3d4-1
 
 ```
 $ carpe status
-pool: myrepo-a1b2c3d4
-root: /home/you/.cache/carpe
-  myrepo-a1b2c3d4-0  [busy]  <- preferred for this worktree
-  myrepo-a1b2c3d4-1  [free]
+Pool:      myrepo-a1b2c3d4
+Marker:    /home/you/src/myrepo/.git/carpe-slot
+Preferred: 0
+
+Slots:
+  myrepo-a1b2c3d4-0         1.2 GB     [free, preferred] (modified: just now)
+  myrepo-a1b2c3d4-1         850.5 MB   [free]            (modified: 10m ago)
+
+Total pool size: 2.05 GB
 ```
 
 ## Build & install
 
-`carpe` uses [`fd-lock`](https://crates.io/crates/fd-lock) for cross-platform advisory file locking (`flock` on Unix, `LockFileEx` on Windows).
+`carpe` is published on crates.io and can be installed via Cargo:
 
+```bash
+cargo install carpe
 ```
-cargo build --release
-install -Dm755 target/release/carpe ~/.local/bin/carpe   # or wherever's on your PATH
+
+Or install from local source:
+
+```bash
+cargo install --path .
 ```
 
-## Caveats / things you may want to tweak
+## License
 
-- **Cross-worktree cache correctness is your call.** Sharing a target dir
-  across worktrees is safe from cargo's perspective (it fingerprints by
-  source content, not by which worktree built it) but if two worktrees are
-  on very different branches, you'll pay for a lot of incremental
-  recompilation the first time you switch — carpe doesn't try to be
-  clever about this, it just gives you a pool to reuse when it *does* help.
-- **NFS / network filesystems:** like cargo itself, `flock` doesn't work
-  reliably on some network filesystems. If your `~/.cache` is on one of
-  these, locking may silently not provide real exclusion.
-- **Pruning old slots:** Target directories accumulate over time. Use `carpe prune` to safely delete unlocked slots, `carpe prune --lru <num>` to keep only the `<num>` newest slots, or `carpe prune -i` for an interactive selection prompt. Built-in locking ensures active build directories are never deleted.
-- **Windows support is best-effort** (`LockFileEx`-based) and less tested
-  than the Unix `flock` path.
-- If you pass an explicit `--target-dir` yourself, carpe doesn't currently
-  detect that and will still set `CARGO_TARGET_DIR` — cargo's own
-  precedence rules mean your explicit flag wins, but it's a little
-  redundant. Worth special-casing if it bugs you.
+Dual-licensed under either of:
+
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE))
+- MIT License ([`LICENSE-MIT`](LICENSE-MIT))
+
+at your option.
