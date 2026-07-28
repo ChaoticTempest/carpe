@@ -164,6 +164,21 @@ fn run_cargo(args: &[String]) {
 
     let (slot_idx, slot_path, _lock) = select_slot(&identity, &root);
 
+    if let Some(existing_env) = env::var_os("CARGO_TARGET_DIR").filter(|s| !s.is_empty()) {
+        eprintln!(
+            "carpe: warning: CARGO_TARGET_DIR is set in environment ({}), overriding with carpe slot {}",
+            existing_env.to_string_lossy(),
+            slot_path.display()
+        );
+    }
+
+    if has_explicit_target_dir_flag(args) {
+        eprintln!(
+            "carpe: warning: explicit --target-dir flag passed in arguments; Cargo CLI flag will take precedence over carpe slot {}",
+            slot_path.display()
+        );
+    }
+
     match preferred {
         Some(p) if p != slot_idx => eprintln!(
             "carpe: preferred slot {dir_name}-{p} is busy, using {dir_name}-{slot_idx} instead (parallel build)"
@@ -740,6 +755,15 @@ fn short_hash(s: &str) -> String {
     format!("{:016x}", h.finish())[..8].to_string()
 }
 
+fn has_explicit_target_dir_flag(args: &[String]) -> bool {
+    for arg in args {
+        if arg == "--target-dir" || arg.starts_with("--target-dir=") {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -990,5 +1014,22 @@ mod tests {
             root.ends_with("carpe"),
             "cache_root path must end with 'carpe'"
         );
+    }
+
+    #[test]
+    fn test_explicit_target_dir_flag_detection() {
+        assert!(has_explicit_target_dir_flag(&[
+            "build".into(),
+            "--target-dir".into(),
+            "/tmp/target".into()
+        ]));
+        assert!(has_explicit_target_dir_flag(&[
+            "build".into(),
+            "--target-dir=/tmp/target".into()
+        ]));
+        assert!(!has_explicit_target_dir_flag(&[
+            "build".into(),
+            "--release".into()
+        ]));
     }
 }
