@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::repo::run_git;
+use crate::utils::extract_toolchain;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitState {
@@ -27,30 +28,32 @@ impl GitState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CargoBuildState {
+    pub toolchain: Option<String>,
     pub profile: Option<String>,
     pub target: Option<String>,
 }
 
 impl CargoBuildState {
     pub fn parse(args: &[String]) -> CargoBuildState {
+        let (toolchain, sub_args) = extract_toolchain(args);
         let mut profile: Option<String> = None;
         let mut target: Option<String> = None;
 
         let mut i = 0;
-        while i < args.len() {
-            let arg = &args[i];
+        while i < sub_args.len() {
+            let arg = &sub_args[i];
             if arg == "--release" || arg == "-r" {
                 profile = Some("release".to_string());
             } else if arg == "--profile" {
-                if i + 1 < args.len() {
-                    profile = Some(args[i + 1].clone());
+                if i + 1 < sub_args.len() {
+                    profile = Some(sub_args[i + 1].clone());
                     i += 1;
                 }
             } else if let Some(p) = arg.strip_prefix("--profile=") {
                 profile = Some(p.to_string());
             } else if arg == "--target" {
-                if i + 1 < args.len() {
-                    target = Some(args[i + 1].clone());
+                if i + 1 < sub_args.len() {
+                    target = Some(sub_args[i + 1].clone());
                     i += 1;
                 }
             } else if let Some(t) = arg.strip_prefix("--target=") {
@@ -63,7 +66,11 @@ impl CargoBuildState {
             profile = Some("debug".to_string());
         }
 
-        CargoBuildState { profile, target }
+        CargoBuildState {
+            toolchain,
+            profile,
+            target,
+        }
     }
 }
 
@@ -71,6 +78,7 @@ impl CargoBuildState {
 pub struct SlotMeta {
     pub head: Option<String>,
     pub branch: Option<String>,
+    pub toolchain: Option<String>,
     pub profile: Option<String>,
     pub target: Option<String>,
     pub timestamp: u64,
@@ -86,6 +94,8 @@ impl SlotMeta {
                 meta.head = Some(val.to_string());
             } else if let Some(val) = line.strip_prefix("branch=") {
                 meta.branch = Some(val.to_string());
+            } else if let Some(val) = line.strip_prefix("toolchain=") {
+                meta.toolchain = Some(val.to_string());
             } else if let Some(val) = line.strip_prefix("profile=") {
                 meta.profile = Some(val.to_string());
             } else if let Some(val) = line.strip_prefix("target=") {
@@ -111,6 +121,9 @@ impl SlotMeta {
         if let Some(b) = &git_state.branch {
             out.push_str(&format!("branch={b}\n"));
         }
+        if let Some(tc) = &build_state.toolchain {
+            out.push_str(&format!("toolchain={tc}\n"));
+        }
         if let Some(p) = &build_state.profile {
             out.push_str(&format!("profile={p}\n"));
         }
@@ -125,6 +138,10 @@ impl SlotMeta {
         let mut score = 0;
         if matches!((&self.head, &current_git.head), (Some(h1), Some(h2)) if h1 == h2) {
             score += 100;
+        }
+        if matches!((&self.toolchain, &current_build.toolchain), (Some(tc1), Some(tc2)) if tc1 == tc2)
+        {
+            score += 50;
         }
         if matches!((&self.profile, &current_build.profile), (Some(p1), Some(p2)) if p1 == p2) {
             score += 40;
@@ -173,6 +190,7 @@ mod tests {
             branch: Some("feature-x".into()),
         };
         let b_state = CargoBuildState {
+            toolchain: None,
             profile: Some("release".into()),
             target: Some("wasm32-unknown-unknown".into()),
         };

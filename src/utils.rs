@@ -89,8 +89,19 @@ pub fn extract_manifest_path(args: &[String]) -> Option<PathBuf> {
     None
 }
 
+pub fn extract_toolchain(args: &[String]) -> (Option<String>, &[String]) {
+    if let Some(first) = args.first() {
+        if first.starts_with('+') && first.len() > 1 {
+            let toolchain = first[1..].to_string();
+            return (Some(toolchain), &args[1..]);
+        }
+    }
+    (None, args)
+}
+
 pub fn is_non_building_subcommand(args: &[String]) -> bool {
-    let Some(first) = args.first() else {
+    let (_, sub_args) = extract_toolchain(args);
+    let Some(first) = sub_args.first() else {
         return false;
     };
     let cmd = first.as_str();
@@ -325,6 +336,19 @@ mod tests {
         check_storage_budget(&root);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_extract_toolchain() {
+        let args1 = vec!["+1.93.0".to_string(), "check".to_string()];
+        let (tc1, rest1) = extract_toolchain(&args1);
+        assert_eq!(tc1, Some("1.93.0".to_string()));
+        assert_eq!(rest1, &["check"]);
+
+        let args2 = vec!["build".to_string(), "--release".to_string()];
+        let (tc2, rest2) = extract_toolchain(&args2);
+        assert_eq!(tc2, None);
+        assert_eq!(rest2, &["build", "--release"]);
     }
 
     #[test]
