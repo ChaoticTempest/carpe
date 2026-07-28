@@ -120,6 +120,102 @@ pub fn normalize_args(raw_args: Vec<String>) -> Vec<String> {
     normalized
 }
 
+pub fn cargo_bin_dir() -> PathBuf {
+    if let Ok(cargo_home) = env::var("CARGO_HOME") {
+        if !cargo_home.trim().is_empty() {
+            return PathBuf::from(cargo_home).join("bin");
+        }
+    }
+
+    let default_home_bin = dirs::home_dir()
+        .unwrap_or_else(env::temp_dir)
+        .join(".cargo")
+        .join("bin");
+
+    if default_home_bin.exists() {
+        return default_home_bin;
+    }
+
+    if let Ok(path_os) = env::var("PATH") {
+        for dir in env::split_paths(&path_os) {
+            let candidate = dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+            if candidate.is_file() {
+                return dir;
+            }
+        }
+    }
+
+    default_home_bin
+}
+
+pub fn cargo_shim_path() -> PathBuf {
+    cargo_bin_dir().join(if cfg!(windows) { "cargo.exe" } else { "cargo" })
+}
+
+pub fn cargo_backup_path() -> PathBuf {
+    cargo_bin_dir().join(if cfg!(windows) {
+        "cargo.real.exe"
+    } else {
+        "cargo.real"
+    })
+}
+
+pub fn is_override_enabled() -> bool {
+    let shim_path = cargo_shim_path();
+    if let Ok(content) = fs::read_to_string(&shim_path) {
+        content.contains("# carpe-shim") || content.contains("rem carpe-shim")
+    } else if let Ok(target) = fs::read_link(&shim_path) {
+        target.to_string_lossy().contains("carpe")
+    } else {
+        false
+    }
+}
+
+pub fn run_toggle_override() {
+    let shim_path = cargo_shim_path();
+    let backup_path = cargo_backup_path();
+
+    if is_override_enabled() {
+        if backup_path.exists() {
+            let _ = fs::rename(&backup_path, &shim_path);
+        } else {
+            let _ = fs::remove_file(&shim_path);
+        }
+        println!("disabling cargo=carpe");
+    } else {
+        if shim_path.exists() && !backup_path.exists() {
+            let _ = fs::rename(&shim_path, &backup_path);
+        }
+
+        let cur_exe = env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "carpe".to_string());
+
+        if let Some(parent) = shim_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = format!("#!/bin/sh\n# carpe-shim\nexec \"{cur_exe}\" \"$@\"\n");
+            if fs::write(&shim_path, script).is_ok() {
+                let _ = fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let script = format!("@echo off\r\nrem carpe-shim\r\n\"{cur_exe}\" %*\r\n");
+            let cmd_path = shim_path.with_extension("cmd");
+            let _ = fs::write(&cmd_path, &script);
+            let _ = fs::write(&shim_path, &script);
+        }
+
+        println!("enabling cargo=carpe");
+    }
+}
+
 pub fn extract_toolchain(args: &[String]) -> (Option<String>, &[String]) {
     if let Some(first) = args.first() {
         if first.starts_with('+') && first.len() > 1 {
@@ -398,5 +494,21 @@ mod tests {
         env::set_var("CARPE_CI", "true");
         assert!(is_ci_environment());
         env::remove_var("CARPE_CI");
+    }
+
+    #[test]
+    fn test_toggle_override_helpers() {
+        assert_eq!(
+            cargo_shim_path().file_name().unwrap(),
+            if cfg!(windows) { "cargo.exe" } else { "cargo" }
+        );
+        assert_eq!(
+            cargo_backup_path().file_name().unwrap(),
+            if cfg!(windows) {
+                "cargo.real.exe"
+            } else {
+                "cargo.real"
+            }
+        );
     }
 }

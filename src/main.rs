@@ -23,7 +23,7 @@ use utils::exit_with_status;
 use utils::{
     bold, cache_root, check_storage_budget, cyan, dim, extract_manifest_path, format_size,
     format_time_ago, green, has_explicit_target_dir_flag, is_non_building_subcommand,
-    normalize_args, status_header, warning_header, yellow,
+    normalize_args, run_toggle_override, status_header, warning_header, yellow,
 };
 
 fn main() {
@@ -47,6 +47,9 @@ fn main() {
         Some("info") => {
             run_info();
         }
+        Some("toggle-override") | Some("override") => {
+            run_toggle_override();
+        }
         Some("prune") => {
             run_prune(&args[1..]);
         }
@@ -65,6 +68,7 @@ fn print_usage() {
     eprintln!(
         "  carpe info                 display detailed workspace, pool, and cache diagnostics"
     );
+    eprintln!("  carpe toggle-override      toggle global cargo=carpe override in ~/.cargo/bin");
     eprintln!("  carpe prune [options]      remove target-dir slots not held by any cargo process");
     eprintln!();
     eprintln!("prune options:");

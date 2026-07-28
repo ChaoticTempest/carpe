@@ -9,6 +9,7 @@ in two worktrees at once instead of blocking on cargo's own build-dir lock.
 carpe <cargo-args...>      # e.g. `carpe build`, `carpe test --release`, `carpe check`
 carpe status                # show target-dir slots for the current repo and whether they're busy
 carpe info                  # display detailed system, workspace root, pool, and cache diagnostics
+carpe toggle-override       # toggle setting global cargo to use carpe (enabling cargo=carpe / disabling cargo=carpe)
 carpe prune                 # clean up target slots for the current repo not held by any build
 carpe prune --auto          # prune oldest slots across pools until size drops under storage budget
 carpe prune -n / --dry-run  # preview target slots to prune without deleting files
