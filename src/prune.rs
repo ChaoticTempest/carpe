@@ -1,0 +1,304 @@
+use std::env;
+use std::fs;
+use std::time::SystemTime;
+
+use dialoguer::{console, theme::ColorfulTheme, MultiSelect};
+
+use crate::lockfile;
+use crate::repo::RepoIdentity;
+use crate::slots::{collect_slots, SlotCandidate};
+use crate::utils::{cache_root, format_size, format_time_ago};
+
+pub fn run_prune(args: &[String]) {
+    let mut interactive = false;
+    let mut lru: Option<usize> = None;
+    let mut prune_all = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-i" | "--interactive" => {
+                interactive = true;
+            }
+            "-a" | "--all" => {
+                prune_all = true;
+            }
+            "--lru" => {
+                if i + 1 < args.len() {
+                    if let Ok(num) = args[i + 1].parse::<usize>() {
+                        lru = Some(num);
+                        i += 1;
+                    } else {
+                        eprintln!("carpe: invalid number for --lru");
+                        std::process::exit(1);
+                    }
+                } else {
+                    eprintln!("carpe: --lru requires a number argument");
+                    std::process::exit(1);
+                }
+            }
+            other => {
+                eprintln!("carpe: unknown prune option '{other}'");
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    let root = cache_root();
+    if !root.exists() {
+        println!("No carpe cache directory found.");
+        return;
+    }
+
+    let (filter_pool, preferred) = if prune_all {
+        (None, None)
+    } else {
+        let cwd = env::current_dir().expect("carpe: cannot read current directory");
+        let identity = RepoIdentity::detect(&cwd);
+        (Some(identity.pool_name()), identity.read_preferred_slot())
+    };
+
+    let mut slots = collect_slots(&root, filter_pool.as_deref(), preferred);
+
+    if slots.is_empty() {
+        println!("No target slots found.");
+        return;
+    }
+
+    if interactive {
+        run_interactive_prune(&mut slots);
+    } else if let Some(keep_count) = lru {
+        run_lru_prune(&mut slots, keep_count);
+    } else {
+        run_default_prune(&slots);
+    }
+}
+
+pub fn run_interactive_prune(slots: &mut [SlotCandidate]) {
+    let mut choices: Vec<String> = Vec::new();
+    let mut default_states: Vec<bool> = Vec::new();
+
+    for slot in slots.iter() {
+        let status = if slot.is_busy {
+            "LOCKED / BUSY"
+        } else if slot.is_preferred {
+            "PREFERRED"
+        } else {
+            "UNLOCKED"
+        };
+        let line = format!(
+            "{:<35} {:<10} {:>10}   (last modified: {})",
+            slot.name,
+            format_size(slot.size_bytes),
+            status,
+            format_time_ago(slot.mtime)
+        );
+        choices.push(line);
+        default_states.push(!slot.is_busy && !slot.is_preferred);
+    }
+
+    println!("Select target slots to prune (Space to select, Enter to confirm):\n");
+
+    let selection = match MultiSelect::with_theme(&ColorfulTheme::default())
+        .items(&choices)
+        .defaults(&default_states)
+        .interact_on_opt(&console::Term::stdout())
+    {
+        Ok(Some(sel)) => sel,
+        Ok(None) => {
+            println!("Prune cancelled.");
+            return;
+        }
+        Err(e) => {
+            eprintln!("carpe: interactive prompt error ({e})");
+            return;
+        }
+    };
+
+    if selection.is_empty() {
+        println!("No slots selected for pruning.");
+        return;
+    }
+
+    let mut pruned_count = 0;
+    let mut total_reclaimed = 0u64;
+
+    for &idx in &selection {
+        let slot = &slots[idx];
+        if slot.is_busy {
+            println!("Skipping {} (currently locked/busy)", slot.name);
+            continue;
+        }
+
+        let lock_path = slot.path.join(".carpe-lock");
+        match lockfile::try_lock(&lock_path) {
+            Ok(Some(_lock)) => {
+                let size = slot.size_bytes;
+                if fs::remove_dir_all(&slot.path).is_ok() {
+                    println!("Pruned {} ({})", slot.name, format_size(size));
+                    pruned_count += 1;
+                    total_reclaimed += size;
+                } else {
+                    eprintln!("Failed to remove {}", slot.path.display());
+                }
+            }
+            _ => {
+                println!("Skipping {} (busy)", slot.name);
+            }
+        }
+    }
+
+    println!(
+        "\nDone: pruned {pruned_count} slots, reclaimed {}.",
+        format_size(total_reclaimed)
+    );
+}
+
+pub fn run_lru_prune(slots: &mut [SlotCandidate], keep_num: usize) {
+    let mut free_slots: Vec<&SlotCandidate> = slots.iter().filter(|s| !s.is_busy).collect();
+
+    free_slots.sort_by(|a, b| {
+        let t_a = a.mtime.unwrap_or(SystemTime::UNIX_EPOCH);
+        let t_b = b.mtime.unwrap_or(SystemTime::UNIX_EPOCH);
+        t_b.cmp(&t_a)
+    });
+
+    if free_slots.len() <= keep_num {
+        println!(
+            "Free slots ({}) <= keep count ({keep_num}), nothing to prune.",
+            free_slots.len()
+        );
+        return;
+    }
+
+    let to_prune = &free_slots[keep_num..];
+    let mut pruned_count = 0;
+    let mut total_reclaimed = 0u64;
+
+    for slot in to_prune {
+        let lock_path = slot.path.join(".carpe-lock");
+        match lockfile::try_lock(&lock_path) {
+            Ok(Some(_lock)) => {
+                let size = slot.size_bytes;
+                if fs::remove_dir_all(&slot.path).is_ok() {
+                    println!("Pruned {} ({})", slot.name, format_size(size));
+                    pruned_count += 1;
+                    total_reclaimed += size;
+                } else {
+                    eprintln!("Failed to remove {}", slot.path.display());
+                }
+            }
+            _ => {
+                println!("Skipping {} (busy)", slot.name);
+            }
+        }
+    }
+
+    println!(
+        "LRU Prune: kept {keep_num} newest free slots, pruned {pruned_count} older slots, reclaimed {}.",
+        format_size(total_reclaimed)
+    );
+}
+
+pub fn run_default_prune(slots: &[SlotCandidate]) {
+    let mut pruned_count = 0;
+    let mut total_reclaimed = 0u64;
+
+    for slot in slots.iter() {
+        if slot.is_busy {
+            println!("Skipping {} (currently locked/busy)", slot.name);
+            continue;
+        }
+        let lock_path = slot.path.join(".carpe-lock");
+        match lockfile::try_lock(&lock_path) {
+            Ok(Some(_lock)) => {
+                let size = slot.size_bytes;
+                if fs::remove_dir_all(&slot.path).is_ok() {
+                    println!("Pruned {} ({})", slot.name, format_size(size));
+                    pruned_count += 1;
+                    total_reclaimed += size;
+                } else {
+                    eprintln!("Failed to remove {}", slot.path.display());
+                }
+            }
+            _ => {
+                println!("Skipping {} (busy)", slot.name);
+            }
+        }
+    }
+
+    println!(
+        "Prune complete: removed {pruned_count} slots, reclaimed {}.",
+        format_size(total_reclaimed)
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rand_nonce() -> u64 {
+        use std::time::UNIX_EPOCH;
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+    }
+
+    #[test]
+    fn test_lru_pruning_selection() {
+        let sys_temp = env::temp_dir();
+        let test_dir = sys_temp.join(format!("carpe_lru_test_{}", rand_nonce()));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let pool_name = "testrepo-12345678";
+        let path0 = test_dir.join(format!("{pool_name}-0"));
+        let path1 = test_dir.join(format!("{pool_name}-1"));
+        let path2 = test_dir.join(format!("{pool_name}-2"));
+
+        fs::create_dir_all(&path0).unwrap();
+        fs::create_dir_all(&path1).unwrap();
+        fs::create_dir_all(&path2).unwrap();
+
+        let now = SystemTime::now();
+        let oldest_time = now - std::time::Duration::from_secs(3600);
+        let middle_time = now - std::time::Duration::from_secs(1800);
+        let newest_time = now;
+
+        let mut slots = vec![
+            SlotCandidate {
+                name: format!("{pool_name}-0"),
+                path: path0.clone(),
+                size_bytes: 1,
+                mtime: Some(oldest_time),
+                is_busy: false,
+                is_preferred: false,
+            },
+            SlotCandidate {
+                name: format!("{pool_name}-1"),
+                path: path1.clone(),
+                size_bytes: 3,
+                mtime: Some(middle_time),
+                is_busy: false,
+                is_preferred: false,
+            },
+            SlotCandidate {
+                name: format!("{pool_name}-2"),
+                path: path2.clone(),
+                size_bytes: 6,
+                mtime: Some(newest_time),
+                is_busy: false,
+                is_preferred: false,
+            },
+        ];
+
+        run_lru_prune(&mut slots, 1);
+
+        assert!(!path0.exists(), "Oldest slot 0 should be pruned");
+        assert!(!path1.exists(), "Middle slot 1 should be pruned");
+        assert!(path2.exists(), "Newest slot 2 should be kept");
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+}
