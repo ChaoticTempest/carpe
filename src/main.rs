@@ -162,7 +162,7 @@ fn run_cargo(args: &[String]) {
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
 
-    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root);
+    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root, &cwd);
 
     if let Some(existing_env) = env::var_os("CARGO_TARGET_DIR").filter(|s| !s.is_empty()) {
         eprintln!(
@@ -211,16 +211,114 @@ fn run_cargo(args: &[String]) {
     }
 }
 
-fn select_slot(identity: &RepoIdentity, root: &Path) -> (usize, PathBuf, lockfile::Lock) {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct GitState {
+    head: Option<String>,
+    branch: Option<String>,
+}
+
+impl GitState {
+    fn detect(cwd: &Path) -> GitState {
+        let head = run_git(cwd, &["rev-parse", "HEAD"]);
+        let branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD");
+        GitState { head, branch }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SlotMeta {
+    head: Option<String>,
+    branch: Option<String>,
+    timestamp: u64,
+}
+
+impl SlotMeta {
+    fn read(slot_path: &Path) -> Option<SlotMeta> {
+        let content = fs::read_to_string(slot_path.join(".carpe-meta")).ok()?;
+        let mut meta = SlotMeta::default();
+        for line in content.lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("head=") {
+                meta.head = Some(val.to_string());
+            } else if let Some(val) = line.strip_prefix("branch=") {
+                meta.branch = Some(val.to_string());
+            } else if let Some(val) = line.strip_prefix("timestamp=") {
+                if let Ok(ts) = val.parse::<u64>() {
+                    meta.timestamp = ts;
+                }
+            }
+        }
+        Some(meta)
+    }
+
+    fn write(slot_path: &Path, git_state: &GitState) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut out = String::new();
+        if let Some(h) = &git_state.head {
+            out.push_str(&format!("head={h}\n"));
+        }
+        if let Some(b) = &git_state.branch {
+            out.push_str(&format!("branch={b}\n"));
+        }
+        out.push_str(&format!("timestamp={ts}\n"));
+        let _ = fs::write(slot_path.join(".carpe-meta"), out);
+    }
+
+    fn score(&self, current_git: &GitState) -> u32 {
+        let mut score = 0;
+        if let (Some(h1), Some(h2)) = (&self.head, &current_git.head) {
+            if h1 == h2 {
+                score += 100;
+            }
+        }
+        if let (Some(b1), Some(b2)) = (&self.branch, &current_git.branch) {
+            if b1 == b2 {
+                score += 50;
+            }
+        }
+        score
+    }
+}
+
+fn select_slot(
+    identity: &RepoIdentity,
+    root: &Path,
+    cwd: &Path,
+) -> (usize, PathBuf, lockfile::Lock) {
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
+    let git_state = GitState::detect(cwd);
 
     let mut candidates = existing_slot_indices(root, &dir_name);
-    candidates.sort_unstable();
+
     if let Some(p) = preferred {
         if let Some(pos) = candidates.iter().position(|&i| i == p) {
             candidates.remove(pos);
             candidates.insert(0, p);
+        }
+    }
+
+    // Rank non-preferred candidate slots by git affinity score (commit/branch match), then timestamp
+    if candidates.len() > 1 {
+        let start_idx = if preferred.is_some() { 1 } else { 0 };
+        if start_idx < candidates.len() {
+            candidates[start_idx..].sort_by(|&a, &b| {
+                let path_a = root.join(format!("{dir_name}-{a}"));
+                let path_b = root.join(format!("{dir_name}-{b}"));
+                let meta_a = SlotMeta::read(&path_a).unwrap_or_default();
+                let meta_b = SlotMeta::read(&path_b).unwrap_or_default();
+                let score_a = meta_a.score(&git_state);
+                let score_b = meta_b.score(&git_state);
+
+                score_b
+                    .cmp(&score_a)
+                    .then_with(|| meta_b.timestamp.cmp(&meta_a.timestamp))
+                    .then_with(|| a.cmp(&b))
+            });
         }
     }
 
@@ -257,6 +355,8 @@ fn select_slot(identity: &RepoIdentity, root: &Path) -> (usize, PathBuf, lockfil
     if preferred != Some(slot_idx) {
         identity.write_preferred_slot(slot_idx);
     }
+
+    SlotMeta::write(&slot_path, &git_state);
 
     (slot_idx, slot_path, lock)
 }
@@ -889,12 +989,12 @@ mod tests {
         let wt_identity = RepoIdentity::detect(&wt_repo);
 
         // Worktree A starts a build and acquires slot 0
-        let (slot_a, path_a, lock_a) = select_slot(&main_identity, &cache_temp);
+        let (slot_a, path_a, lock_a) = select_slot(&main_identity, &cache_temp, &main_repo);
         assert_eq!(slot_a, 0, "First worktree build should allocate slot 0");
         assert!(path_a.ends_with(format!("{}-0", main_identity.pool_name())));
 
         // Worktree B starts a build while Worktree A is still building (lock_a held)
-        let (slot_b, path_b, lock_b) = select_slot(&wt_identity, &cache_temp);
+        let (slot_b, path_b, lock_b) = select_slot(&wt_identity, &cache_temp, &wt_repo);
         assert_eq!(
             slot_b, 1,
             "Second worktree should fall back to slot 1 when slot 0 is locked"
@@ -910,14 +1010,14 @@ mod tests {
         drop(lock_b);
 
         // Worktree B runs build again; slot 1 is free and preferred for B, so B reuses slot 1
-        let (slot_b2, _, lock_b2) = select_slot(&wt_identity, &cache_temp);
+        let (slot_b2, _, lock_b2) = select_slot(&wt_identity, &cache_temp, &wt_repo);
         assert_eq!(
             slot_b2, 1,
             "Worktree B should reuse preferred slot 1 when free"
         );
 
         // Worktree A runs build again; slot 0 is free and preferred for A, so A reuses slot 0
-        let (slot_a2, _, lock_a2) = select_slot(&main_identity, &cache_temp);
+        let (slot_a2, _, lock_a2) = select_slot(&main_identity, &cache_temp, &main_repo);
         assert_eq!(
             slot_a2, 0,
             "Worktree A should reuse preferred slot 0 when free"
@@ -1031,5 +1131,26 @@ mod tests {
             "build".into(),
             "--release".into()
         ]));
+    }
+
+    #[test]
+    fn test_slot_meta_read_write() {
+        let sys_temp = env::temp_dir();
+        let slot_path = sys_temp.join(format!("carpe_meta_test_{}", rand_nonce()));
+        fs::create_dir_all(&slot_path).unwrap();
+
+        let state = GitState {
+            head: Some("a1b2c3d4e5f6".into()),
+            branch: Some("feature-x".into()),
+        };
+
+        SlotMeta::write(&slot_path, &state);
+
+        let read_meta = SlotMeta::read(&slot_path).expect("meta should be readable");
+        assert_eq!(read_meta.head, Some("a1b2c3d4e5f6".into()));
+        assert_eq!(read_meta.branch, Some("feature-x".into()));
+        assert_eq!(read_meta.score(&state), 150);
+
+        let _ = fs::remove_dir_all(&slot_path);
     }
 }
