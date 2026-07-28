@@ -18,42 +18,31 @@ pub fn run_prune(args: &[String]) {
     let mut prune_all = false;
     let mut dry_run = false;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-i" | "--interactive" => {
-                interactive = true;
-            }
-            "-a" | "--all" => {
-                prune_all = true;
-            }
+    let mut args_iter = args.iter();
+    while let Some(arg) = args_iter.next() {
+        match arg.as_str() {
+            "-i" | "--interactive" => interactive = true,
+            "-a" | "--all" => prune_all = true,
             "--auto" => {
                 auto_prune = true;
                 prune_all = true;
             }
-            "-n" | "--dry-run" => {
-                dry_run = true;
-            }
+            "-n" | "--dry-run" => dry_run = true,
             "--lru" => {
-                if i + 1 < args.len() {
-                    if let Ok(num) = args[i + 1].parse::<usize>() {
-                        lru = Some(num);
-                        i += 1;
-                    } else {
-                        eprintln!("carpe: invalid number for --lru");
-                        std::process::exit(1);
-                    }
-                } else {
+                let num_str = args_iter.next().unwrap_or_else(|| {
                     eprintln!("carpe: --lru requires a number argument");
                     std::process::exit(1);
-                }
+                });
+                lru = Some(num_str.parse::<usize>().unwrap_or_else(|_| {
+                    eprintln!("carpe: invalid number for --lru");
+                    std::process::exit(1);
+                }));
             }
             other => {
                 eprintln!("carpe: unknown prune option '{other}'");
                 std::process::exit(1);
             }
         }
-        i += 1;
     }
 
     let root = cache_root();

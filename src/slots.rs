@@ -41,19 +41,25 @@ pub fn select_slot(
     if candidates.len() > 1 {
         let start_idx = if preferred.is_some() { 1 } else { 0 };
         if start_idx < candidates.len() {
-            candidates[start_idx..].sort_by(|&a, &b| {
-                let path_a = root.join(format!("{dir_name}-{a}"));
-                let path_b = root.join(format!("{dir_name}-{b}"));
-                let meta_a = SlotMeta::read(&path_a).unwrap_or_default();
-                let meta_b = SlotMeta::read(&path_b).unwrap_or_default();
-                let score_a = meta_a.score(&git_state, &build_state);
-                let score_b = meta_b.score(&git_state, &build_state);
+            let slice = &mut candidates[start_idx..];
+            let mut ranked: Vec<(usize, u32, u64)> = slice
+                .iter()
+                .map(|&idx| {
+                    let path = root.join(format!("{dir_name}-{idx}"));
+                    let meta = SlotMeta::read(&path).unwrap_or_default();
+                    let score = meta.score(&git_state, &build_state);
+                    (idx, score, meta.timestamp)
+                })
+                .collect();
 
-                score_b
-                    .cmp(&score_a)
-                    .then_with(|| meta_b.timestamp.cmp(&meta_a.timestamp))
-                    .then_with(|| a.cmp(&b))
+            ranked.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then_with(|| b.2.cmp(&a.2))
+                    .then_with(|| a.0.cmp(&b.0))
             });
+            for (i, (idx, _, _)) in ranked.into_iter().enumerate() {
+                slice[i] = idx;
+            }
         }
     }
 
