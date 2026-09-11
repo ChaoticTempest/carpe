@@ -23,7 +23,7 @@ use utils::exit_with_status;
 use utils::{
     bold, cache_root, check_storage_budget, cyan, dim, extract_manifest_path, format_size,
     format_time_ago, green, has_explicit_target_dir_flag, is_non_building_subcommand,
-    normalize_args, run_toggle_override, status_header, warning_header, yellow,
+    normalize_args, real_cargo_cmd, run_toggle_override, status_header, warning_header, yellow,
 };
 
 fn main() {
@@ -87,7 +87,7 @@ fn print_usage() {
 
 fn run_cargo(args: &[String]) {
     if is_non_building_subcommand(args) {
-        let mut cmd = Command::new("cargo");
+        let mut cmd = real_cargo_cmd(args);
         cmd.args(args);
         spawn_or_exec_cargo(cmd);
     }
@@ -137,7 +137,7 @@ fn run_cargo(args: &[String]) {
         ),
     }
 
-    let mut cmd = Command::new("cargo");
+    let mut cmd = real_cargo_cmd(args);
     cmd.args(args).env("CARGO_TARGET_DIR", &slot_path);
     spawn_or_exec_cargo(cmd);
 }

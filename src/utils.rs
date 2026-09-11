@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dialoguer::console::style;
@@ -158,6 +159,84 @@ pub fn cargo_backup_path() -> PathBuf {
     } else {
         "cargo.real"
     })
+}
+
+pub fn which_bin(name: &str) -> Option<PathBuf> {
+    let filename = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    if let Ok(path_os) = env::var("PATH") {
+        for dir in env::split_paths(&path_os) {
+            let candidate = dir.join(&filename);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+pub fn real_cargo_cmd(args: &[String]) -> Command {
+    if let Ok(path) = env::var("CARPE_CARGO_PATH") {
+        let mut cmd = Command::new(path);
+        cmd.env("_CARPE_RECURSION_GUARD", "1");
+        return cmd;
+    }
+
+    let backup = cargo_backup_path();
+    if backup.is_file() {
+        let mut cmd = Command::new(backup);
+        cmd.env("_CARPE_RECURSION_GUARD", "1");
+        return cmd;
+    }
+
+    let (toolchain_opt, _) = extract_toolchain(args);
+    if let Some(toolchain) = toolchain_opt {
+        if let Some(rustup_path) = which_bin("rustup") {
+            let mut cmd = Command::new(rustup_path);
+            cmd.arg(format!("+{toolchain}")).arg("cargo");
+            cmd.env("_CARPE_RECURSION_GUARD", "1");
+            return cmd;
+        }
+    }
+
+    if let Ok(rustup_cargo) = Command::new("rustup").arg("which").arg("cargo").output() {
+        if rustup_cargo.status.success() {
+            if let Ok(path_str) = String::from_utf8(rustup_cargo.stdout) {
+                let path = PathBuf::from(path_str.trim());
+                if let Ok(cur_exe) = env::current_exe() {
+                    let cur_canon = canonicalize_best_effort(&cur_exe);
+                    let path_canon = canonicalize_best_effort(&path);
+                    if path_canon != cur_canon && path.is_file() {
+                        let mut cmd = Command::new(path);
+                        cmd.env("_CARPE_RECURSION_GUARD", "1");
+                        return cmd;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(cur_exe) = env::current_exe() {
+        let cur_canon = canonicalize_best_effort(&cur_exe);
+        if let Ok(path_os) = env::var("PATH") {
+            for dir in env::split_paths(&path_os) {
+                let candidate = dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+                let candidate_canon = canonicalize_best_effort(&candidate);
+                if candidate_canon != cur_canon && candidate.is_file() {
+                    let mut cmd = Command::new(candidate);
+                    cmd.env("_CARPE_RECURSION_GUARD", "1");
+                    return cmd;
+                }
+            }
+        }
+    }
+
+    let mut cmd = Command::new("cargo");
+    cmd.env("_CARPE_RECURSION_GUARD", "1");
+    cmd
 }
 
 pub fn is_override_enabled() -> bool {
@@ -510,5 +589,11 @@ mod tests {
                 "cargo.real"
             }
         );
+    }
+
+    #[test]
+    fn test_real_cargo_cmd() {
+        let cmd = real_cargo_cmd(&["build".into()]);
+        assert!(!cmd.get_program().to_string_lossy().is_empty());
     }
 }
