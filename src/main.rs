@@ -17,7 +17,7 @@ use std::process::Command;
 
 use prune::run_prune;
 use repo::RepoIdentity;
-use slots::{collect_slots, select_slot};
+use slots::{scan_slots_with_total, select_slot};
 #[cfg(not(unix))]
 use utils::exit_with_status;
 use utils::{
@@ -182,16 +182,16 @@ fn run_status() {
     }
 
     let pref = identity.read_preferred_slot();
-    let slots = collect_slots(&root, Some(&pool_name), pref);
+    let scan = scan_slots_with_total(&root, Some(&pool_name), pref);
 
-    if slots.is_empty() {
+    if scan.slots.is_empty() {
         println!("Slots:     (none exist for this pool yet)");
         return;
     }
 
     println!("\nSlots:");
     let mut total_size = 0u64;
-    for s in &slots {
+    for s in &scan.slots {
         total_size += s.size_bytes;
         let status_str = if s.is_busy {
             yellow("LOCKED/BUSY")
@@ -210,7 +210,7 @@ fn run_status() {
         );
     }
     println!("\nTotal pool size: {}", bold(format_size(total_size)));
-    check_storage_budget(&root);
+    check_storage_budget(scan.total_bytes);
 }
 
 fn run_info() {
@@ -247,7 +247,8 @@ fn run_info() {
 
     if root.exists() {
         let pref = identity.read_preferred_slot();
-        let slots = collect_slots(&root, Some(&pool_name), pref);
+        let scan = scan_slots_with_total(&root, Some(&pool_name), pref);
+        let slots = scan.slots;
         let free_count = slots.iter().filter(|s| !s.is_busy).count();
         let busy_count = slots.iter().filter(|s| s.is_busy).count();
         let total_size: u64 = slots.iter().map(|s| s.size_bytes).sum();
@@ -258,7 +259,7 @@ fn run_info() {
             yellow(format!("{busy_count} busy")),
             bold(format_size(total_size))
         );
-        check_storage_budget(&root);
+        check_storage_budget(scan.total_bytes);
     } else {
         println!("\nSlot Pool Stats: Cache directory does not exist yet.");
     }

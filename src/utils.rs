@@ -360,10 +360,14 @@ pub fn dir_size(path: &Path) -> u64 {
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_dir() {
-                size += dir_size(&p);
-            } else if let Ok(meta) = p.metadata() {
-                size += meta.len();
+            // One metadata call per entry (fs::metadata follows symlinks, as
+            // Path::is_dir and Path::metadata did before).
+            if let Ok(meta) = fs::metadata(&p) {
+                if meta.is_dir() {
+                    size += dir_size(&p);
+                } else {
+                    size += meta.len();
+                }
             }
         }
     }
@@ -384,27 +388,13 @@ pub fn slot_mtime(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
-pub fn check_storage_budget(root: &Path) {
-    if !root.exists() {
-        return;
-    }
-
+pub fn check_storage_budget(total_bytes: u64) {
     let max_gb: f64 = env::var("CARPE_MAX_STORAGE_GB")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(128.0);
 
     let max_bytes = (max_gb * 1024.0 * 1024.0 * 1024.0) as u64;
-
-    let mut total_bytes = 0u64;
-    if let Ok(entries) = fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                total_bytes += dir_size(&path);
-            }
-        }
-    }
 
     if total_bytes > max_bytes {
         eprintln!(
@@ -534,14 +524,9 @@ mod tests {
 
     #[test]
     fn test_check_storage_budget() {
-        let sys_temp = env::temp_dir();
-        let root = sys_temp.join(format!("carpe_budget_test_{}", test_rand_nonce()));
-        fs::create_dir_all(&root).unwrap();
-
-        // Should execute smoothly without crashing
-        check_storage_budget(&root);
-
-        let _ = fs::remove_dir_all(&root);
+        // The total is supplied by the caller's single cache scan.
+        check_storage_budget(0);
+        check_storage_budget(1024 * 1024);
     }
 
     #[test]

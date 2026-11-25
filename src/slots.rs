@@ -17,6 +17,14 @@ pub struct SlotCandidate {
     pub is_preferred: bool,
 }
 
+/// Result of one walk over the cache root: candidate slots plus the total size
+/// of every top-level directory (including non-slot directories such as `state/`).
+#[derive(Debug, Clone)]
+pub struct SlotScan {
+    pub slots: Vec<SlotCandidate>,
+    pub total_bytes: u64,
+}
+
 pub fn select_slot(
     identity: &RepoIdentity,
     root: &Path,
@@ -106,6 +114,48 @@ pub fn existing_slot_indices(root: &Path, pool_name: &str) -> Vec<usize> {
     out
 }
 
+/// Shared pool-name / slot-index filter used by both collection paths.
+fn matches_pool_filter(name: &str, filter_pool: Option<&str>) -> bool {
+    let Some(pool) = filter_pool else {
+        return true;
+    };
+    let prefix = format!("{pool}-");
+    match name.strip_prefix(&prefix) {
+        Some(rest) => rest.parse::<usize>().is_ok(),
+        None => false,
+    }
+}
+
+/// Build a candidate from an already-measured directory, so callers that need a
+/// total can reuse the size from the same walk instead of measuring it twice.
+fn make_candidate(
+    path: &Path,
+    size_bytes: u64,
+    filter_pool: Option<&str>,
+    preferred: Option<usize>,
+) -> SlotCandidate {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+
+    let lock_path = path.join(".carpe-lock");
+    let is_busy = !matches!(lockfile::try_lock(&lock_path), Ok(Some(_)));
+
+    let mtime = slot_mtime(path);
+
+    let is_preferred = match (filter_pool, preferred) {
+        (Some(pool), Some(pref_idx)) => name == format!("{pool}-{pref_idx}"),
+        _ => false,
+    };
+
+    SlotCandidate {
+        name: name.into_owned(),
+        path: path.to_path_buf(),
+        size_bytes,
+        mtime,
+        is_busy,
+        is_preferred,
+    }
+}
+
 pub fn collect_slots(
     root: &Path,
     filter_pool: Option<&str>,
@@ -124,46 +174,53 @@ pub fn collect_slots(
         }
 
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-
-        if let Some(pool) = filter_pool {
-            let prefix = format!("{pool}-");
-            if !name.starts_with(&prefix) {
-                continue;
-            }
-            let rest = &name[prefix.len()..];
-            if rest.parse::<usize>().is_err() {
-                continue;
-            }
+        if !matches_pool_filter(&name, filter_pool) {
+            continue;
         }
 
-        let lock_path = path.join(".carpe-lock");
-        let is_busy = !matches!(lockfile::try_lock(&lock_path), Ok(Some(_)));
-
         let size = dir_size(&path);
-        let mtime = slot_mtime(&path);
-
-        let is_preferred = if let Some(pool) = filter_pool {
-            if let Some(pref_idx) = preferred {
-                name == format!("{pool}-{pref_idx}")
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        candidates.push(SlotCandidate {
-            name: name.into_owned(),
-            path,
-            size_bytes: size,
-            mtime,
-            is_busy,
-            is_preferred,
-        });
+        candidates.push(make_candidate(&path, size, filter_pool, preferred));
     }
 
     candidates.sort_by(|a, b| a.name.cmp(&b.name));
     candidates
+}
+
+/// Walk the cache root once, measuring every top-level directory exactly once.
+///
+/// `total_bytes` is the sum of `dir_size` over all directories directly under
+/// `root` (matching the old `check_storage_budget` semantics), while `slots`
+/// contains candidates only for directories matching `filter_pool`.
+pub fn scan_slots_with_total(
+    root: &Path,
+    filter_pool: Option<&str>,
+    preferred: Option<usize>,
+) -> SlotScan {
+    let mut slots = Vec::new();
+    let mut total_bytes = 0u64;
+    let entries = match fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return SlotScan { slots, total_bytes },
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let size = dir_size(&path);
+        total_bytes += size;
+
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if !matches_pool_filter(&name, filter_pool) {
+            continue;
+        }
+        slots.push(make_candidate(&path, size, filter_pool, preferred));
+    }
+
+    slots.sort_by(|a, b| a.name.cmp(&b.name));
+    SlotScan { slots, total_bytes }
 }
 
 #[cfg(test)]
@@ -309,5 +366,45 @@ mod tests {
         drop(lock_b2);
         drop(lock_a2);
         let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn test_scan_slots_with_total_filters_candidates_but_counts_all_dirs() {
+        let sys_temp = env::temp_dir();
+        let root = sys_temp.join(format!("carpe_scan_test_{}", test_rand_nonce()));
+        fs::create_dir_all(&root).unwrap();
+
+        let pool_a0 = root.join("pool-a-0");
+        let pool_b0 = root.join("pool-b-0");
+        let state = root.join("state");
+        for dir in [&pool_a0, &pool_b0, &state] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        // Pre-create lock files so the scan itself does not add entries.
+        fs::write(pool_a0.join(".carpe-lock"), b"").unwrap();
+        fs::write(pool_b0.join(".carpe-lock"), b"").unwrap();
+
+        fs::create_dir_all(pool_a0.join("nested")).unwrap();
+        fs::write(pool_a0.join("nested").join("blob"), vec![7u8; 100]).unwrap();
+        fs::write(pool_b0.join("blob"), vec![7u8; 200]).unwrap();
+        fs::write(state.join("db"), vec![7u8; 400]).unwrap();
+        // A loose file directly under the root is not in any directory total.
+        fs::write(root.join("loose"), vec![7u8; 800]).unwrap();
+
+        let scan = scan_slots_with_total(&root, Some("pool-a"), Some(0));
+        let names: Vec<&str> = scan.slots.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["pool-a-0"]);
+        assert_eq!(scan.slots[0].size_bytes, 100);
+        assert!(scan.slots[0].is_preferred);
+        assert!(!scan.slots[0].is_busy);
+        // The total is produced by the same walk; no extra root traversal is needed.
+        assert_eq!(scan.total_bytes, 100 + 200 + 400);
+
+        let all = scan_slots_with_total(&root, None, None);
+        let all_names: Vec<&str> = all.slots.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(all_names, vec!["pool-a-0", "pool-b-0", "state"]);
+        assert_eq!(all.total_bytes, 100 + 200 + 400);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
