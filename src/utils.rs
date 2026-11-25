@@ -1,7 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -59,9 +57,15 @@ pub fn sanitize(s: &str) -> String {
 }
 
 pub fn short_hash(s: &str) -> String {
-    let mut h = DefaultHasher::new();
-    s.hash(&mut h);
-    format!("{:016x}", h.finish())[..8].to_string()
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = OFFSET_BASIS;
+    for byte in s.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")[..8].to_string()
 }
 
 pub fn has_explicit_target_dir_flag(args: &[String]) -> bool {
@@ -466,6 +470,12 @@ mod tests {
         assert_eq!(short_hash("hello"), short_hash("hello"));
         assert_ne!(short_hash("hello"), short_hash("world"));
         assert_eq!(short_hash("hello").len(), 8);
+    }
+
+    #[test]
+    fn test_short_hash_known_answer() {
+        // FNV-1a 64 of "hello" is a430d84680aabd0b; must stay stable across toolchains.
+        assert_eq!(short_hash("hello"), "a430d846");
     }
 
     #[test]
