@@ -285,6 +285,15 @@ mod tests {
         let (identity, git_state) = detect_context(&repo);
         let pool_name = RepoIdentity::detect(&repo).pool_name();
 
+        // Detached HEAD: HEAD resolves, but there is no branch name.
+        assert!(git(&["checkout", "--detach", "HEAD"]));
+        let (detached_identity, detached_state) = detect_context(&repo);
+
+        // A non-git directory has no git state at all.
+        let plain = root.join("not-a-repo");
+        fs::create_dir_all(&plain).unwrap();
+        let (_, plain_state) = detect_context(&plain);
+
         // Clean up before asserting so a failing assertion cannot leak the repo.
         let _ = fs::remove_dir_all(&root);
 
@@ -303,6 +312,21 @@ mod tests {
             git_state.branch.as_deref(),
             Some("HEAD"),
             "branch should be a real branch name, not detached HEAD"
+        );
+
+        assert_eq!(detached_identity.pool_name(), pool_name);
+        assert!(
+            detached_state.head.is_some(),
+            "HEAD should still resolve on a detached HEAD"
+        );
+        assert!(
+            detached_state.branch.is_none(),
+            "a detached HEAD must not report a branch"
+        );
+        assert_eq!(
+            plain_state,
+            GitState::default(),
+            "a non-git directory must have no git state"
         );
     }
 }

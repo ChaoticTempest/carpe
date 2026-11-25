@@ -2,6 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -184,21 +185,18 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     a.dev() == b.dev() && a.ino() == b.ino()
 }
 
-#[cfg(windows)]
-fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    a.volume_serial_number() == b.volume_serial_number() && a.file_index() == b.file_index()
-}
-
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(unix))]
 fn same_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
     false
 }
 
 /// True only when `candidate` is the very same file as the `rustup` executable
-/// in its canonicalized bin directory (a rustup proxy is a symlink/hardlink to
-/// rustup). A merely co-located cargo, e.g. a distro cargo in `/usr/bin`, does
-/// not qualify and must go through `rustup which cargo` for toolchain selection.
+/// in its canonicalized bin directory. On Unix a rustup proxy is a symlink or
+/// hardlink to rustup, detected via `dev`/`ino`. On non-Unix platforms (e.g.
+/// Windows, where rustup proxies are copies rather than links) this check
+/// conservatively returns false so cargo is resolved via `rustup which cargo`
+/// for toolchain selection. A merely co-located cargo, e.g. a distro cargo in
+/// `/usr/bin`, does not qualify either.
 fn is_rustup_proxy(candidate_canon: &Path, bin_dir_canon: &Path) -> bool {
     let Some(parent) = candidate_canon.parent() else {
         return false;
@@ -308,13 +306,36 @@ pub fn real_cargo_cmd(args: &[String]) -> Command {
 /// Detects a carpe wrapper: the marker scripts written by `run_toggle_override`
 /// or a symlink pointing at carpe.
 pub fn is_carpe_shim(path: &Path) -> bool {
-    if let Ok(content) = fs::read_to_string(path) {
-        content.contains("# carpe-shim") || content.contains("rem carpe-shim")
-    } else if let Ok(target) = fs::read_link(path) {
-        target.to_string_lossy().contains("carpe")
-    } else {
-        false
+    const MAX_SHIM_BYTES: u64 = 4096;
+
+    // A symlink can be classified without opening (possibly huge) target.
+    if let Ok(link_meta) = fs::symlink_metadata(path) {
+        if link_meta.is_symlink() {
+            if let Ok(target) = fs::read_link(path) {
+                if target.to_string_lossy().contains("carpe") {
+                    return true;
+                }
+            }
+        }
     }
+
+    // Shim scripts are tiny; never read whole native cargo/rustup binaries.
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() > MAX_SHIM_BYTES {
+        return false;
+    }
+
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = Vec::new();
+    if file.take(MAX_SHIM_BYTES).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    std::str::from_utf8(&buf)
+        .is_ok_and(|content| content.contains("# carpe-shim") || content.contains("rem carpe-shim"))
 }
 
 pub fn is_override_enabled() -> bool {
@@ -681,6 +702,21 @@ mod tests {
         fs::write(&plain, "#!/bin/sh\nexec /usr/bin/cargo \"$@\"\n").unwrap();
         assert!(!is_carpe_shim(&plain));
 
+        // Non-UTF-8 binary data must not be treated as a shim.
+        let binary = root.join("binary-cargo");
+        let mut binary_bytes = vec![0xff, b'E', b'L', b'F', 0x00, 0x01, 0x02];
+        binary_bytes.extend_from_slice(b"# carpe-shim\n");
+        fs::write(&binary, binary_bytes).unwrap();
+        assert!(!is_carpe_shim(&binary));
+
+        // Oversized files are skipped entirely, even if a marker is present
+        // just past the read limit.
+        let oversized = root.join("oversized-cargo");
+        let mut oversized_bytes = vec![b'x'; 4096];
+        oversized_bytes.extend_from_slice(b"\n# carpe-shim\n");
+        fs::write(&oversized, oversized_bytes).unwrap();
+        assert!(!is_carpe_shim(&oversized));
+
         #[cfg(unix)]
         {
             let link = root.join("cargo-link");
@@ -718,22 +754,34 @@ mod tests {
             "a co-located but distinct cargo must not qualify"
         );
 
-        // A cargo that is the same file as rustup qualifies, matching the
-        // real-world rustup proxy layout.
-        let rustup = bin.join(rustup_name);
-        fs::write(&rustup, "#!/bin/sh\n").unwrap();
-        let cargo = bin.join(cargo_name);
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&rustup, &cargo).unwrap();
-        #[cfg(windows)]
-        fs::hard_link(&rustup, &cargo).unwrap();
-        assert!(
-            is_rustup_proxy(
-                &canonicalize_best_effort(&cargo),
-                &canonicalize_best_effort(&bin)
-            ),
-            "a cargo that is the same file as rustup qualifies"
-        );
+        {
+            let rustup = bin.join(rustup_name);
+            fs::write(&rustup, "#!/bin/sh\n").unwrap();
+
+            // A hardlink shares rustup's inode under a distinct path, matching
+            // the real-world rustup proxy layout.
+            let hardlinked = bin.join(format!("{cargo_name}-hardlink"));
+            fs::hard_link(&rustup, &hardlinked).unwrap();
+            assert!(
+                is_rustup_proxy(
+                    &canonicalize_best_effort(&hardlinked),
+                    &canonicalize_best_effort(&bin)
+                ),
+                "a hardlink to rustup qualifies"
+            );
+
+            // A symlink to rustup resolves to the same file as well.
+            let cargo = bin.join(cargo_name);
+            std::os::unix::fs::symlink(&rustup, &cargo).unwrap();
+            assert!(
+                is_rustup_proxy(
+                    &canonicalize_best_effort(&cargo),
+                    &canonicalize_best_effort(&bin)
+                ),
+                "a symlink to rustup qualifies"
+            );
+        }
 
         let _ = fs::remove_dir_all(&root);
     }

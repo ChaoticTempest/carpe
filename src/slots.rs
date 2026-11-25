@@ -35,7 +35,7 @@ pub fn select_slot(
         .map(|&idx| {
             let path = root.join(format!("{dir_name}-{idx}"));
             let meta = SlotMeta::read(&path).unwrap_or_default();
-            let mut score = meta.score(&git_state, &build_state);
+            let mut score = meta.score(git_state, &build_state);
             if preferred == Some(idx) {
                 score += 75; // Baseline priority weight for this worktree's preferred slot
             }
@@ -83,7 +83,7 @@ pub fn select_slot(
         identity.write_preferred_slot(slot_idx);
     }
 
-    SlotMeta::write(&slot_path, &git_state, &build_state);
+    SlotMeta::write(&slot_path, git_state, &build_state);
 
     (slot_idx, slot_path, lock)
 }
