@@ -184,4 +184,89 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("carpe_repo_{label}_{}", test_rand_nonce()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_git_helpers_in_and_outside_a_repository() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(git_dirs(repo).is_some());
+        assert!(git_common_dir(repo).is_some());
+        assert!(git_dir(repo).is_some());
+
+        let non_git = temp_dir("nogit");
+        assert!(git_dirs(&non_git).is_none());
+        assert!(git_common_dir(&non_git).is_none());
+        assert!(git_dir(&non_git).is_none());
+        assert!(run_git(&non_git, &["rev-parse", "HEAD"]).is_none());
+        fs::remove_dir_all(&non_git).unwrap();
+    }
+
+    #[test]
+    fn test_resolve_absolute_and_relative_git_paths() {
+        assert_eq!(
+            resolve(Path::new("/work/tree"), "/repo/.git/worktrees/x"),
+            PathBuf::from("/repo/.git/worktrees/x")
+        );
+        assert_eq!(
+            resolve(Path::new("/work/tree"), ".git"),
+            PathBuf::from("/work/tree/.git")
+        );
+    }
+
+    #[test]
+    fn test_preferred_slot_marker_read_and_write() {
+        let dir = temp_dir("marker");
+        let marker_dir = dir.join("gitdir");
+        let identity = RepoIdentity {
+            name_source: PathBuf::from("/repos/project"),
+            repo_identity: PathBuf::from("/repos/project"),
+            marker_dir: marker_dir.clone(),
+        };
+
+        assert_eq!(identity.marker_path(), marker_dir.join("carpe-slot"));
+        assert_eq!(
+            identity.read_preferred_slot(),
+            None,
+            "missing marker -> None"
+        );
+
+        identity.write_preferred_slot(3);
+        assert_eq!(identity.read_preferred_slot(), Some(3));
+
+        fs::write(identity.marker_path(), "garbage").unwrap();
+        assert_eq!(
+            identity.read_preferred_slot(),
+            None,
+            "invalid marker -> None"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_non_git_fallback_without_cargo_toml() {
+        let dir = temp_dir("fallback");
+        assert!(find_cargo_workspace_root(&dir).is_none());
+
+        let identity = RepoIdentity::detect(&dir);
+        let canonical = canonicalize_best_effort(&dir);
+        assert_eq!(identity.name_source, canonical);
+        assert_eq!(identity.repo_identity, canonical);
+        assert!(identity.marker_dir.starts_with(cache_root().join("state")));
+        assert!(!identity.pool_name().is_empty());
+
+        let no_name = RepoIdentity {
+            name_source: PathBuf::from("/"),
+            repo_identity: PathBuf::from("/"),
+            marker_dir: dir.clone(),
+        };
+        assert!(no_name.pool_name().starts_with("project-"));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

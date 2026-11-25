@@ -534,9 +534,15 @@ mod tests {
 
     #[test]
     fn test_check_storage_budget() {
+        let sys_temp = env::temp_dir();
+        let root = sys_temp.join(format!("carpe_budget_test_{}", test_rand_nonce()));
+        fs::create_dir_all(&root).unwrap();
+
         // The total is supplied by the caller's single cache scan.
-        check_storage_budget(0);
+        check_storage_budget(dir_size(&root));
         check_storage_budget(1024 * 1024);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -563,11 +569,83 @@ mod tests {
         assert_eq!(norm2, vec!["build", "--release", "--features", "foo"]);
     }
 
+    const CHILD_CASE: &str = "CARPE_UTILS_CHILD_CASE";
+    const CHILD_DIR: &str = "CARPE_UTILS_CHILD_DIR";
+
+    /// Runs one test function in a fresh process with a fully controlled
+    /// environment. Unit tests therefore never mutate env vars while other
+    /// tests are running in parallel.
+    fn run_child(test: &str, case: &str, envs: &[(&str, &str)], removes: &[&str]) {
+        let exe = env::current_exe().expect("current test executable");
+        let mut cmd = Command::new(exe);
+        cmd.args(["--exact", test, "--nocapture"])
+            .env(CHILD_CASE, case);
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        for key in removes {
+            cmd.env_remove(key);
+        }
+        let out = cmd.output().expect("spawn isolated child test");
+        assert!(
+            out.status.success(),
+            "child case {case} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("carpe_utils_{label}_{}", test_rand_nonce()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn test_is_ci_environment() {
-        env::set_var("CARPE_CI", "true");
-        assert!(is_ci_environment());
-        env::remove_var("CARPE_CI");
+        if let Ok(case) = env::var(CHILD_CASE) {
+            let expected = !matches!(case.as_str(), "none" | "ci_false");
+            assert_eq!(is_ci_environment(), expected, "case {case}");
+            return;
+        }
+
+        let test = "utils::tests::test_is_ci_environment";
+        run_child(
+            test,
+            "none",
+            &[],
+            &["CI", "CARPE_CI", "CONTINUOUS_INTEGRATION"],
+        );
+        run_child(
+            test,
+            "ci",
+            &[("CI", "true")],
+            &["CARPE_CI", "CONTINUOUS_INTEGRATION"],
+        );
+        run_child(
+            test,
+            "ci_one",
+            &[("CI", "1")],
+            &["CARPE_CI", "CONTINUOUS_INTEGRATION"],
+        );
+        run_child(
+            test,
+            "carpe_ci",
+            &[("CARPE_CI", "true")],
+            &["CI", "CONTINUOUS_INTEGRATION"],
+        );
+        run_child(
+            test,
+            "ci_false",
+            &[("CI", "false")],
+            &["CARPE_CI", "CONTINUOUS_INTEGRATION"],
+        );
+        run_child(
+            test,
+            "continuous",
+            &[("CONTINUOUS_INTEGRATION", "1")],
+            &["CI", "CARPE_CI"],
+        );
     }
 
     #[test]
@@ -587,8 +665,351 @@ mod tests {
     }
 
     #[test]
+    fn test_toggle_override_in_isolated_cargo_home() {
+        if let Ok(case) = env::var(CHILD_CASE) {
+            let before = is_override_enabled();
+            run_toggle_override();
+            let after = is_override_enabled();
+            match case.as_str() {
+                "enable" => {
+                    assert!(!before);
+                    assert!(after, "shim must be detected after enabling");
+                    assert!(cargo_backup_path().exists());
+                }
+                "disable" => {
+                    assert!(before);
+                    assert!(!after, "shim must be gone after disabling");
+                    assert!(!cargo_backup_path().exists());
+                }
+                other => panic!("unknown case {other}"),
+            }
+            return;
+        }
+
+        let dir = temp_dir("toggle");
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let shim = bin.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+        let original = "ORIGINAL REAL CARGO\n";
+        fs::write(&shim, original).unwrap();
+
+        let home = dir.to_str().unwrap();
+        let test = "utils::tests::test_toggle_override_in_isolated_cargo_home";
+        run_child(
+            test,
+            "enable",
+            &[("CARGO_HOME", home)],
+            &["CARPE_CARGO_PATH"],
+        );
+        run_child(
+            test,
+            "disable",
+            &[("CARGO_HOME", home)],
+            &["CARPE_CARGO_PATH"],
+        );
+
+        assert_eq!(fs::read_to_string(&shim).unwrap(), original);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn test_real_cargo_cmd() {
-        let cmd = real_cargo_cmd(&["build".into()]);
-        assert!(!cmd.get_program().to_string_lossy().is_empty());
+        use std::ffi::OsStr;
+
+        if let Ok(case) = env::var(CHILD_CASE) {
+            let args: Vec<String> = if case == "rustup_toolchain" {
+                vec!["+nightly".into(), "build".into()]
+            } else {
+                vec!["build".into()]
+            };
+            let cmd = real_cargo_cmd(&args);
+            let guard_set = cmd.get_envs().any(|(key, value)| {
+                key == OsStr::new("_CARPE_RECURSION_GUARD") && value == Some(OsStr::new("1"))
+            });
+            assert!(guard_set, "real cargo must carry the recursion guard");
+            match case.as_str() {
+                "override" => assert_eq!(cmd.get_program(), Path::new("/fake/cargo")),
+                "backup" => assert_eq!(cmd.get_program(), cargo_backup_path()),
+                "fallback" => assert_eq!(cmd.get_program(), Path::new("cargo")),
+                #[cfg(unix)]
+                "rustup_toolchain" => {
+                    assert_eq!(cmd.get_program(), which_bin("rustup").unwrap())
+                }
+                #[cfg(unix)]
+                "rustup_which" => {
+                    let expected = Path::new(&env::var(CHILD_DIR).unwrap()).join("fake-cargo");
+                    assert_eq!(cmd.get_program(), expected);
+                }
+                other => panic!("unknown case {other}"),
+            }
+            return;
+        }
+
+        let test = "utils::tests::test_real_cargo_cmd";
+
+        // CARPE_CARGO_PATH takes precedence over everything else.
+        run_child(
+            test,
+            "override",
+            &[("CARPE_CARGO_PATH", "/fake/cargo")],
+            &["CARGO_HOME"],
+        );
+
+        // A backed-up shim (cargo.real) is used next.
+        let backup_home = temp_dir("backup");
+        let backup = backup_home.join("bin").join(if cfg!(windows) {
+            "cargo.real.exe"
+        } else {
+            "cargo.real"
+        });
+        fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        fs::write(&backup, "#!/bin/sh\n").unwrap();
+        run_child(
+            test,
+            "backup",
+            &[("CARGO_HOME", backup_home.to_str().unwrap())],
+            &["CARPE_CARGO_PATH"],
+        );
+
+        // With an empty PATH and no backup, fall back to the name "cargo".
+        let empty_home = temp_dir("emptyhome");
+        run_child(
+            test,
+            "fallback",
+            &[("CARGO_HOME", empty_home.to_str().unwrap()), ("PATH", "")],
+            &["CARPE_CARGO_PATH"],
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let tool_dir = temp_dir("rustup");
+            let rustup = tool_dir.join("rustup");
+            fs::write(
+                &rustup,
+                format!(
+                    "#!/bin/sh\necho {}\n",
+                    tool_dir.join("fake-cargo").display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::write(tool_dir.join("fake-cargo"), "#!/bin/sh\necho fake\n").unwrap();
+
+            for case in ["rustup_toolchain", "rustup_which"] {
+                run_child(
+                    test,
+                    case,
+                    &[
+                        ("CARGO_HOME", empty_home.to_str().unwrap()),
+                        ("PATH", tool_dir.to_str().unwrap()),
+                        (CHILD_DIR, tool_dir.to_str().unwrap()),
+                    ],
+                    &["CARPE_CARGO_PATH"],
+                );
+            }
+            fs::remove_dir_all(&tool_dir).unwrap();
+        }
+
+        fs::remove_dir_all(&backup_home).unwrap();
+        fs::remove_dir_all(&empty_home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cargo_bin_dir_falls_back_to_path() {
+        if env::var(CHILD_CASE).is_ok() {
+            assert_eq!(
+                cargo_bin_dir(),
+                Path::new(&env::var(CHILD_DIR).unwrap()).join("bin")
+            );
+            return;
+        }
+        let dir = temp_dir("bindir");
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("cargo"), "#!/bin/sh\n").unwrap();
+        run_child(
+            "utils::tests::test_cargo_bin_dir_falls_back_to_path",
+            "scan",
+            &[
+                ("HOME", dir.to_str().unwrap()),
+                ("PATH", bin.to_str().unwrap()),
+                (CHILD_DIR, dir.to_str().unwrap()),
+            ],
+            &["CARGO_HOME"],
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_format_time_ago_all_branches() {
+        assert_eq!(format_time_ago(None), "never");
+        assert_eq!(
+            format_time_ago(Some(
+                SystemTime::now() + std::time::Duration::from_secs(3600)
+            )),
+            "recently"
+        );
+        assert_eq!(format_time_ago(Some(SystemTime::now())), "just now");
+        assert_eq!(
+            format_time_ago(Some(
+                SystemTime::now() - std::time::Duration::from_secs(180)
+            )),
+            "3m ago"
+        );
+        assert_eq!(
+            format_time_ago(Some(
+                SystemTime::now() - std::time::Duration::from_secs(7200)
+            )),
+            "2h ago"
+        );
+        assert_eq!(
+            format_time_ago(Some(
+                SystemTime::now() - std::time::Duration::from_secs(3 * 86400)
+            )),
+            "3d ago"
+        );
+    }
+
+    #[test]
+    fn test_dir_size_nested_and_missing() {
+        let dir = temp_dir("dirsize");
+        let nested = dir.join("a").join("b");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(dir.join("top.bin"), vec![0u8; 10]).unwrap();
+        fs::write(nested.join("deep.bin"), vec![0u8; 25]).unwrap();
+        assert_eq!(dir_size(&dir), 35);
+        assert_eq!(dir_size(&dir.join("not-here")), 0);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_slot_mtime_meta_and_directory_fallback() {
+        let dir = temp_dir("slotmtime");
+        let meta = dir.join(".carpe-meta");
+        fs::write(&meta, "timestamp=1000000000\n").unwrap();
+        assert_eq!(
+            slot_mtime(&dir),
+            Some(UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+        );
+
+        fs::remove_file(&meta).unwrap();
+        let before = SystemTime::now() - std::time::Duration::from_secs(2);
+        assert!(slot_mtime(&dir).unwrap() >= before, "dir mtime fallback");
+
+        fs::write(&meta, "timestamp=broken\n").unwrap();
+        assert!(
+            slot_mtime(&dir).unwrap() >= before,
+            "malformed meta -> dir mtime"
+        );
+        assert!(slot_mtime(&dir.join("missing")).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_normalize_args_all_supported_flags() {
+        assert_eq!(
+            normalize_args(vec!["--package my-crate".into()]),
+            vec!["--package", "my-crate"]
+        );
+        assert_eq!(
+            normalize_args(vec!["--target wasm32-unknown-unknown".into()]),
+            vec!["--target", "wasm32-unknown-unknown"]
+        );
+        assert_eq!(
+            normalize_args(vec!["--profile release".into()]),
+            vec!["--profile", "release"]
+        );
+        assert_eq!(
+            normalize_args(vec!["--manifest-path /x/Cargo.toml".into()]),
+            vec!["--manifest-path", "/x/Cargo.toml"]
+        );
+        assert_eq!(
+            normalize_args(vec!["--features a,b".into()]),
+            vec!["--features", "a,b"]
+        );
+        assert_eq!(
+            normalize_args(vec!["build".into(), "--release".into()]),
+            vec!["build", "--release"]
+        );
+    }
+
+    #[test]
+    fn test_extract_manifest_path_edge_cases() {
+        assert_eq!(
+            extract_manifest_path(&["build".into(), "--manifest-path".into()]),
+            None
+        );
+        assert_eq!(
+            extract_manifest_path(&["build".into(), "--manifest-path=/Cargo.toml".into()]),
+            Some(PathBuf::from("/"))
+        );
+        assert_eq!(
+            extract_manifest_path(&["build".into(), "--manifest-path=rel/Cargo.toml".into()]),
+            Some(PathBuf::from("rel"))
+        );
+    }
+
+    #[test]
+    fn test_target_dir_flag_edge_cases() {
+        assert!(!has_explicit_target_dir_flag(&[]));
+        assert!(has_explicit_target_dir_flag(&["--target-dir=/x".into()]));
+        assert!(!has_explicit_target_dir_flag(&[
+            "--target".into(),
+            "x86_64".into()
+        ]));
+    }
+
+    #[test]
+    fn test_non_building_subcommand_more_cases() {
+        assert!(is_non_building_subcommand(&[
+            "+nightly".into(),
+            "fmt".into(),
+            "--check".into()
+        ]));
+        for cmd in [
+            "add", "remove", "rm", "metadata", "tree", "new", "init", "publish", "search", "login",
+            "logout", "owner", "vendor", "yank",
+        ] {
+            assert!(is_non_building_subcommand(&[cmd.into()]), "{cmd}");
+        }
+        assert!(!is_non_building_subcommand(&[
+            "+nightly".into(),
+            "build".into()
+        ]));
+        let empty: Vec<String> = Vec::new();
+        assert!(!is_non_building_subcommand(&empty));
+    }
+
+    #[test]
+    fn test_which_bin_found_and_missing() {
+        assert!(
+            which_bin("cargo").is_some(),
+            "cargo must be on PATH in tests"
+        );
+        assert!(which_bin("carpe-definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn test_color_helpers_and_headers() {
+        for rendered in [
+            cyan("value"),
+            green("value"),
+            yellow("value"),
+            bold("value"),
+            dim("value"),
+        ] {
+            assert!(rendered.contains("value"));
+        }
+        assert!(status_header("Carpe").contains("Carpe"));
+        assert!(warning_header("Warning").contains("Warning"));
+    }
+
+    #[test]
+    fn test_canonicalize_best_effort_missing_path() {
+        let missing = env::temp_dir().join(format!("carpe-no-such-path-{}", test_rand_nonce()));
+        assert_eq!(canonicalize_best_effort(&missing), missing);
     }
 }

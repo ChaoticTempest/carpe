@@ -284,6 +284,7 @@ fn try_prune_slot(slot: &SlotCandidate, dry_run: bool) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::utils::test_rand_nonce;
+    use std::path::Path;
 
     #[test]
     fn test_lru_pruning_selection() {
@@ -383,5 +384,104 @@ mod tests {
         assert!(path1.exists(), "Newest slot 1 should be retained");
 
         let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    fn make_slot(
+        dir: &Path,
+        name: &str,
+        size: u64,
+        age_secs: u64,
+        is_busy: bool,
+        is_preferred: bool,
+    ) -> SlotCandidate {
+        let path = dir.join(name);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("data.bin"), vec![1u8; size as usize]).unwrap();
+        SlotCandidate {
+            name: name.to_string(),
+            path,
+            size_bytes: size,
+            mtime: Some(SystemTime::now() - std::time::Duration::from_secs(age_secs)),
+            is_busy,
+            is_preferred,
+        }
+    }
+
+    #[test]
+    fn test_default_prune_dry_run_and_skips_busy_slots() {
+        let test_dir = env::temp_dir().join(format!("carpe_prune_default_{}", test_rand_nonce()));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let free = make_slot(&test_dir, "pool-0", 32, 300, false, false);
+        let busy = make_slot(&test_dir, "pool-1", 64, 200, true, false);
+        let contended = make_slot(&test_dir, "pool-2", 128, 100, false, false);
+
+        let lock_path = contended.path.join(".carpe-lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        let mut lock = fd_lock::RwLock::new(file);
+        let guard = lock.try_write().unwrap();
+
+        let slots = [free.clone(), busy.clone(), contended.clone()];
+        run_default_prune(&slots, true);
+        assert!(free.path.exists(), "dry-run must not delete anything");
+        assert!(busy.path.exists());
+        assert!(contended.path.exists());
+
+        run_default_prune(&slots, false);
+        assert!(!free.path.exists(), "free slot should be pruned");
+        assert!(busy.path.exists(), "busy slot must be skipped");
+        assert!(contended.path.exists(), "locked slot must be skipped");
+
+        drop(guard);
+        fs::remove_dir_all(&test_dir).unwrap();
+    }
+
+    #[test]
+    fn test_auto_prune_within_budget_dry_run_and_busy_skip() {
+        let test_dir = env::temp_dir().join(format!("carpe_prune_auto2_{}", test_rand_nonce()));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let mut within = vec![make_slot(&test_dir, "within-0", 512, 0, false, false)];
+        run_auto_prune(&mut within, 128.0, false);
+        assert!(within[0].path.exists(), "within budget -> nothing pruned");
+
+        let mut dry = vec![make_slot(&test_dir, "dry-0", 512, 0, false, false)];
+        run_auto_prune(&mut dry, 0.0000001, true);
+        assert!(dry[0].path.exists(), "auto dry-run must not delete");
+
+        let busy = make_slot(&test_dir, "over-0", 512, 3600, true, false);
+        let free = make_slot(&test_dir, "over-1", 128, 0, false, false);
+        let mut over = vec![busy.clone(), free.clone()];
+        run_auto_prune(&mut over, 0.0000001, false);
+        assert!(busy.path.exists(), "busy slot must never be pruned");
+        assert!(!free.path.exists(), "oldest free slot should be pruned");
+
+        fs::remove_dir_all(&test_dir).unwrap();
+    }
+
+    #[test]
+    fn test_lru_prune_keep_count_and_dry_run() {
+        let test_dir = env::temp_dir().join(format!("carpe_prune_lru2_{}", test_rand_nonce()));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let old = make_slot(&test_dir, "lru-0", 10, 3600, false, false);
+        let mid = make_slot(&test_dir, "lru-1", 20, 1800, false, false);
+        let new = make_slot(&test_dir, "lru-2", 30, 0, false, false);
+
+        let mut all = vec![old.clone(), mid.clone(), new.clone()];
+        run_lru_prune(&mut all, 3, false);
+        assert!(old.path.exists() && mid.path.exists() && new.path.exists());
+
+        run_lru_prune(&mut all, 1, true);
+        assert!(old.path.exists(), "dry-run must not delete oldest");
+        assert!(mid.path.exists());
+        assert!(new.path.exists());
+
+        fs::remove_dir_all(&test_dir).unwrap();
     }
 }

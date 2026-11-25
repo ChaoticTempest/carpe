@@ -664,4 +664,126 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    fn temp_root(label: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("carpe_slots_{label}_{}", test_rand_nonce()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn identity_at(dir: &Path) -> RepoIdentity {
+        RepoIdentity {
+            name_source: PathBuf::from("example-repo"),
+            repo_identity: PathBuf::from("example-repo-identity"),
+            marker_dir: dir.join("marker"),
+        }
+    }
+
+    #[test]
+    fn test_select_slot_holistic_score_beats_stale_preferred_slot() {
+        let dir = temp_root("score");
+        let root = dir.join("cache");
+        fs::create_dir_all(&root).unwrap();
+        let identity = identity_at(&dir);
+        let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let git = GitState::detect(cwd);
+        let build = CargoBuildState::parse(&["build".into(), "--release".into()]);
+        let pool = identity.pool_name();
+
+        let matching = root.join(format!("{pool}-0"));
+        let stale = root.join(format!("{pool}-1"));
+        fs::create_dir_all(&matching).unwrap();
+        fs::create_dir_all(&stale).unwrap();
+        SlotMeta::write(&matching, &git, &build);
+        SlotMeta::write(&stale, &GitState::default(), &CargoBuildState::default());
+        identity.write_preferred_slot(1);
+        assert_eq!(identity.read_preferred_slot(), Some(1));
+
+        let (idx, path, lock) =
+            select_slot(&identity, &root, cwd, &["build".into(), "--release".into()])
+                .expect("affinity slot selection should succeed");
+        assert_eq!(
+            idx, 0,
+            "affinity score must outweigh the 75-point preferred bonus"
+        );
+        assert_eq!(path, matching);
+        assert_eq!(identity.read_preferred_slot(), Some(0));
+        assert!(matching.join(".carpe-meta").exists());
+        drop(lock);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_select_slot_creates_slot_zero_when_pool_is_empty() {
+        let dir = temp_root("newslot");
+        let root = dir.join("cache");
+        fs::create_dir_all(&root).unwrap();
+        let identity = identity_at(&dir);
+        let pool = identity.pool_name();
+
+        let (idx, path, lock) = select_slot(&identity, &root, &dir, &["build".into()])
+            .expect("creating the first slot should succeed");
+        assert_eq!(idx, 0);
+        assert_eq!(path, root.join(format!("{pool}-0")));
+        assert!(path.join(".carpe-lock").exists());
+        assert_eq!(identity.read_preferred_slot(), Some(0));
+        drop(lock);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_existing_slot_indices_and_collect_slots_filters() {
+        let dir = temp_root("collect");
+        let missing = dir.join("does-not-exist");
+        assert!(existing_slot_indices(&missing, "pool").is_empty());
+        assert!(collect_slots(&missing, None, None).is_empty());
+
+        let root = dir.join("cache");
+        fs::create_dir_all(root.join("pool-0")).unwrap();
+        fs::create_dir_all(root.join("pool-2")).unwrap();
+        fs::create_dir_all(root.join("pool-not-a-number")).unwrap();
+        fs::create_dir_all(root.join("other-1")).unwrap();
+        fs::write(root.join("pool-0").join("data.bin"), vec![5u8; 42]).unwrap();
+        fs::write(root.join("loose-file"), "not a slot").unwrap();
+        fs::write(root.join("pool-not-a-number").join("data.bin"), "x").unwrap();
+
+        let mut indices = existing_slot_indices(&root, "pool");
+        indices.sort_unstable();
+        assert_eq!(indices, vec![0, 2]);
+
+        let lock_path = root.join("pool-2").join(".carpe-lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        let mut lock = fd_lock::RwLock::new(file);
+        let guard = lock.try_write().unwrap();
+
+        let slots = collect_slots(&root, Some("pool"), Some(0));
+        assert_eq!(
+            slots.len(),
+            2,
+            "non-numeric suffix and other pools must be filtered"
+        );
+        assert_eq!(slots[0].name, "pool-0");
+        assert!(slots[0].is_preferred);
+        assert!(!slots[0].is_busy);
+        assert_eq!(slots[0].size_bytes, 42);
+        assert_eq!(slots[1].name, "pool-2");
+        assert!(slots[1].is_busy);
+
+        let all = collect_slots(&root, None, Some(0));
+        assert!(all.iter().any(|s| s.name == "other-1"));
+        assert!(
+            all.iter().all(|s| !s.is_preferred),
+            "no pool filter -> no preferred flag"
+        );
+
+        drop(guard);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

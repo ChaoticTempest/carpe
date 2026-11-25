@@ -226,4 +226,211 @@ mod tests {
 
         let _ = fs::remove_dir_all(&slot_path);
     }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn test_parse_profile_target_and_features_variants() {
+        let release_short = CargoBuildState::parse(&argv(&["build", "-r"]));
+        assert_eq!(release_short.profile.as_deref(), Some("release"));
+
+        let profile_split = CargoBuildState::parse(&argv(&["build", "--profile", "custom"]));
+        assert_eq!(profile_split.profile.as_deref(), Some("custom"));
+
+        let profile_eq = CargoBuildState::parse(&argv(&["build", "--profile=custom"]));
+        assert_eq!(profile_eq.profile.as_deref(), Some("custom"));
+
+        let target_split =
+            CargoBuildState::parse(&argv(&["build", "--target", "wasm32-unknown-unknown"]));
+        assert_eq!(
+            target_split.target.as_deref(),
+            Some("wasm32-unknown-unknown")
+        );
+
+        let target_eq =
+            CargoBuildState::parse(&argv(&["build", "--target=wasm32-unknown-unknown"]));
+        assert_eq!(target_eq.target.as_deref(), Some("wasm32-unknown-unknown"));
+
+        let features_split = CargoBuildState::parse(&argv(&["build", "--features", "a,b"]));
+        assert_eq!(features_split.features.as_deref(), Some("a,b"));
+
+        let features_eq = CargoBuildState::parse(&argv(&["build", "--features=a,b"]));
+        assert_eq!(features_eq.features.as_deref(), Some("a,b"));
+
+        let features_short = CargoBuildState::parse(&argv(&["build", "-F", "serde"]));
+        assert_eq!(features_short.features.as_deref(), Some("serde"));
+
+        let toolchain = CargoBuildState::parse(&argv(&["+nightly", "build", "--features", "a"]));
+        assert_eq!(toolchain.toolchain.as_deref(), Some("nightly"));
+        assert_eq!(toolchain.features.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn test_parse_missing_flag_values_and_defaults() {
+        // A flag at the end of argv has no value to consume.
+        assert_eq!(
+            CargoBuildState::parse(&argv(&["build", "--profile"]))
+                .profile
+                .as_deref(),
+            Some("debug")
+        );
+        assert_eq!(
+            CargoBuildState::parse(&argv(&["build", "--target"])).target,
+            None
+        );
+        assert_eq!(
+            CargoBuildState::parse(&argv(&["build", "--features"])).features,
+            None
+        );
+        assert_eq!(
+            CargoBuildState::parse(&argv(&["build", "-F"])).features,
+            None
+        );
+
+        // `--profile` consumes the following token even when it looks like a flag.
+        let consumed = CargoBuildState::parse(&argv(&["build", "--profile", "--target"]));
+        assert_eq!(consumed.profile.as_deref(), Some("--target"));
+        assert_eq!(consumed.target, None);
+
+        let defaults = CargoBuildState::parse(&argv(&["build"]));
+        assert_eq!(
+            defaults,
+            CargoBuildState {
+                toolchain: None,
+                profile: Some("debug".into()),
+                target: None,
+                features: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_slot_meta_read_missing_and_malformed() {
+        let sys_temp = env::temp_dir();
+        let slot = sys_temp.join(format!("carpe_meta_missing_{}", test_rand_nonce()));
+        assert!(SlotMeta::read(&slot).is_none(), "missing meta file -> None");
+
+        fs::create_dir_all(&slot).unwrap();
+        fs::write(
+            slot.join(".carpe-meta"),
+            "head=abc\nbranch=main\nprofile=release\ntimestamp=not-a-number\nunknown=ignored\n",
+        )
+        .unwrap();
+        let meta = SlotMeta::read(&slot).unwrap();
+        assert_eq!(meta.head.as_deref(), Some("abc"));
+        assert_eq!(meta.branch.as_deref(), Some("main"));
+        assert_eq!(meta.profile.as_deref(), Some("release"));
+        assert_eq!(meta.timestamp, 0, "malformed timestamp falls back to 0");
+        assert_eq!(meta.target, None);
+        assert_eq!(meta.features, None);
+
+        fs::remove_dir_all(&slot).unwrap();
+    }
+
+    #[test]
+    fn test_slot_meta_write_read_all_fields() {
+        let sys_temp = env::temp_dir();
+        let slot = sys_temp.join(format!("carpe_meta_full_{}", test_rand_nonce()));
+        fs::create_dir_all(&slot).unwrap();
+
+        let git = GitState {
+            head: Some("deadbeef".into()),
+            branch: Some("topic".into()),
+        };
+        let build = CargoBuildState {
+            toolchain: Some("stable".into()),
+            profile: Some("release".into()),
+            target: Some("x86_64-apple-darwin".into()),
+            features: Some("a,b".into()),
+        };
+        SlotMeta::write(&slot, &git, &build);
+        let meta = SlotMeta::read(&slot).unwrap();
+        assert_eq!(meta.head.as_deref(), Some("deadbeef"));
+        assert_eq!(meta.branch.as_deref(), Some("topic"));
+        assert_eq!(meta.toolchain.as_deref(), Some("stable"));
+        assert_eq!(meta.profile.as_deref(), Some("release"));
+        assert_eq!(meta.target.as_deref(), Some("x86_64-apple-darwin"));
+        assert_eq!(meta.features.as_deref(), Some("a,b"));
+        assert!(meta.timestamp > 0);
+
+        fs::remove_dir_all(&slot).unwrap();
+    }
+
+    #[test]
+    fn test_slot_meta_score_covers_every_field() {
+        let git = GitState {
+            head: Some("h".into()),
+            branch: Some("b".into()),
+        };
+        let build = CargoBuildState {
+            toolchain: Some("t".into()),
+            profile: Some("p".into()),
+            target: Some("x".into()),
+            features: Some("f".into()),
+        };
+        let full = SlotMeta {
+            head: Some("h".into()),
+            branch: Some("b".into()),
+            toolchain: Some("t".into()),
+            profile: Some("p".into()),
+            target: Some("x".into()),
+            features: Some("f".into()),
+            timestamp: 0,
+        };
+        assert_eq!(full.score(&git, &build), 290);
+
+        let mut no_head = full.clone();
+        no_head.head = None;
+        assert_eq!(no_head.score(&git, &build), 190, "head is worth 100");
+
+        let mut no_toolchain = full.clone();
+        no_toolchain.toolchain = None;
+        assert_eq!(
+            no_toolchain.score(&git, &build),
+            240,
+            "toolchain is worth 50"
+        );
+
+        let mut no_profile = full.clone();
+        no_profile.profile = None;
+        assert_eq!(no_profile.score(&git, &build), 250, "profile is worth 40");
+
+        let mut no_target = full.clone();
+        no_target.target = None;
+        assert_eq!(no_target.score(&git, &build), 250, "target is worth 40");
+
+        let mut no_features = full.clone();
+        no_features.features = None;
+        assert_eq!(no_features.score(&git, &build), 250, "features is worth 40");
+
+        let mut no_branch = full.clone();
+        no_branch.branch = None;
+        assert_eq!(no_branch.score(&git, &build), 270, "branch is worth 20");
+
+        let mut mismatched = full;
+        mismatched.head = Some("different".into());
+        mismatched.features = Some("different".into());
+        assert_eq!(mismatched.score(&git, &build), 150);
+    }
+
+    #[test]
+    fn test_git_state_detect_in_and_outside_git() {
+        let sys_temp = env::temp_dir();
+        let non_git = sys_temp.join(format!("carpe_nongit_{}", test_rand_nonce()));
+        fs::create_dir_all(&non_git).unwrap();
+        assert_eq!(
+            GitState::detect(&non_git),
+            GitState {
+                head: None,
+                branch: None
+            }
+        );
+        fs::remove_dir_all(&non_git).unwrap();
+
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let detected = GitState::detect(repo);
+        assert!(detected.head.is_some(), "crate root is a git worktree");
+    }
 }
