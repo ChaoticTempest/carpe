@@ -24,29 +24,39 @@ pub struct SlotCandidate {
 
 /// Lock a brand-new slot, re-scanning on every attempt: another process may
 /// create (and lock) our chosen index between the snapshot and the lock call.
+/// Prefer the next index past the highest existing slot, then reuse the lowest
+/// unused, untried gap below [`MAX_NEW_SLOT_ATTEMPTS`].
 fn allocate_new_slot(dir_name: &str, root: &Path) -> io::Result<(usize, PathBuf, lockfile::Lock)> {
+    fs::create_dir_all(root)?;
     let mut min_next = 0usize;
+    let mut tried = [false; MAX_NEW_SLOT_ATTEMPTS];
     for _ in 0..MAX_NEW_SLOT_ATTEMPTS {
         let indices = existing_slot_indices(root, dir_name);
-        let next = indices
+        let mut next = indices
             .iter()
             .map(|idx| idx.saturating_add(1))
             .max()
             .unwrap_or(0)
             .max(min_next);
-        min_next = next.saturating_add(1);
         if next >= MAX_NEW_SLOT_ATTEMPTS {
-            break;
+            next = match (0..MAX_NEW_SLOT_ATTEMPTS)
+                .find(|idx| !tried[*idx] && !indices.contains(idx))
+            {
+                Some(idx) => idx,
+                None => break,
+            };
         }
+        tried[next] = true;
+        min_next = next.saturating_add(1);
 
         let slot_path = root.join(format!("{dir_name}-{next}"));
-        let freshly_created = !slot_path.exists();
-        if let Err(e) = fs::create_dir_all(&slot_path) {
-            if freshly_created {
-                let _ = fs::remove_dir(&slot_path);
-            }
-            return Err(e);
-        }
+        // create_dir is atomic: it tells us whether we won the dir without an
+        // exists()/create_dir_all() race window.
+        let freshly_created = match fs::create_dir(&slot_path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(e) => return Err(e),
+        };
 
         let lock_path = slot_path.join(".carpe-lock");
         match lockfile::try_lock(&lock_path) {
@@ -438,6 +448,49 @@ mod tests {
         }
 
         drop(busy_locks);
+        let _ = fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn test_allocate_new_slot_reuses_gap_when_highest_slot_busy() {
+        let sys_temp = env::temp_dir();
+        let root_dir = sys_temp.join(format!(
+            "carpe_gap_reuse_slots_{}_{}",
+            std::process::id(),
+            test_rand_nonce()
+        ));
+        let cache_root = root_dir.join("cache");
+        let identity = RepoIdentity {
+            name_source: root_dir.join("repo"),
+            repo_identity: root_dir.clone(),
+            marker_dir: root_dir.join("markers"),
+        };
+        let pool_name = identity.pool_name();
+
+        // Only the highest bounded index exists, and it is busy. Indices 0..15
+        // are free but non-existent, so allocation must fall back to a gap.
+        let busy_idx = MAX_NEW_SLOT_ATTEMPTS - 1;
+        let busy_path = cache_root.join(format!("{pool_name}-{busy_idx}"));
+        fs::create_dir_all(&busy_path).unwrap();
+        let busy_lock = lockfile::try_lock(&busy_path.join(".carpe-lock"))
+            .expect("pre-lock should not hit an I/O error")
+            .expect("pre-existing slot should be lockable");
+
+        let (idx, slot_path, lock) = select_slot(&identity, &cache_root, &root_dir, &[])
+            .expect("a free gap below the busy highest slot must be allocated");
+        assert!(
+            idx < busy_idx,
+            "allocation must reuse a gap instead of failing, got slot {idx}"
+        );
+        assert_eq!(idx, 0, "the lowest gap should be chosen first");
+        assert_eq!(slot_path, cache_root.join(format!("{pool_name}-{idx}")));
+
+        let contender = lockfile::try_lock(&slot_path.join(".carpe-lock"))
+            .expect("lock check should not hit an I/O error");
+        assert!(contender.is_none(), "returned slot must hold a valid lock");
+
+        drop(lock);
+        drop(busy_lock);
         let _ = fs::remove_dir_all(&root_dir);
     }
 
