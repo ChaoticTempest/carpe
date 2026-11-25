@@ -1,113 +1,161 @@
 # carpe
 
-Multiplexes `CARGO_TARGET_DIR` across git worktrees, so several worktrees of
-the same repo can share a small pool of pre-built target directories instead
-of each maintaining (and rebuilding) its own — while still letting you build
-in two worktrees at once instead of blocking on cargo's own build-dir lock.
+`carpe` multiplexes `CARGO_TARGET_DIR` across git worktrees. All worktrees of a
+repo share a small pool of target directories, so you can build in two
+worktrees at once instead of blocking on Cargo's own build-directory lock,
+while reusing incremental artifacts.
 
-```
-carpe <cargo-args...>      # e.g. `carpe build`, `carpe test --release`, `carpe check`
-carpe status                # show target-dir slots for the current repo and whether they're busy
-carpe info                  # display detailed system, workspace root, pool, and cache diagnostics
-carpe toggle-override       # toggle setting global cargo to use carpe (enabling cargo=carpe / disabling cargo=carpe)
-carpe prune                 # clean up target slots for the current repo not held by any build
-carpe prune --auto          # prune oldest slots across pools until size drops under storage budget
-carpe prune -n / --dry-run  # preview target slots to prune without deleting files
-carpe prune -i              # interactive menu to choose which target slots to delete
-carpe prune --lru <num>     # keep the <num> newest unlocked target slots and prune older ones
-carpe prune -a              # prune unlocked target slots across all repositories under ~/.cache/carpe
-```
+Arguments after `carpe` are passed to `cargo`: carpe selects a slot, sets
+`CARGO_TARGET_DIR`, and execs the real cargo. See the
+[CLI reference](docs/cli-reference.md), [architecture](docs/architecture.md),
+and [contributing guide](docs/contributing.md) for details.
 
-Everything after `carpe` is passed straight through to `cargo`, unmodified.
-The only thing `carpe` does is pick a `CARGO_TARGET_DIR` and set it before
-exec'ing `cargo`.
+## Quick start
 
-## How slot selection works
+| Command | Purpose |
+| --- | --- |
+| `carpe build` | Run `cargo build` with an allocated target-dir slot |
+| `carpe test --release` | Any cargo arguments work (`carpe check`, `carpe +nightly build`, `--manifest-path`, ...) |
+| `carpe status` | Show pool, preferred slot, slot sizes, and busy state |
+| `carpe info` | Show workspace, pool, cache root, and slot statistics |
+| `carpe toggle-override` | Install/remove the global `cargo` shim that routes through carpe (alias: `carpe override`) |
+| `carpe prune` | Remove unlocked slots in the current repo's pool |
+| `carpe prune -n` | Preview deletions without removing files |
+| `carpe prune -i` | Choose slots interactively (disabled in CI/non-interactive terminals) |
+| `carpe prune --lru 2` | Keep the two newest unlocked slots in the current pool |
+| `carpe prune --auto` | Prune oldest unlocked slots across all pools until under the storage budget |
+| `carpe prune -a` | Prune unlocked slots across all pools |
+| `carpe -h` / `carpe --help` | Print usage (exit `0`); no arguments prints usage with exit `2` |
+| `carpe -V` / `carpe --version` | Print `carpe 0.1.0` |
 
-1. **Identify the repo or workspace.** `git rev-parse --git-common-dir` gives the same
-   answer in every worktree of a given repo, so it's used as the pool's
-   identity. Outside of Git repositories, `carpe` automatically traverses parent directories
-   to locate the top-level Cargo workspace root (`Cargo.toml`).
-2. **Identify this worktree.** `git rev-parse --git-dir` gives a path that's
-   *different per worktree* (each linked worktree has its own private git
-   dir under `<main>/.git/worktrees/<name>`). That's where carpe stores a
-   one-line marker recording which slot this worktree used last time —
-   nothing in `~/.cache` needs to track worktrees itself, and when you
-   `git worktree remove` a worktree, its marker disappears with it. No
-   central state file, no stale entries to garbage-collect.
-3. **Smart Affinity Scoring.** Reusing a target dir is what makes incremental compilation pay off.
-   When searching free slots, `carpe` scores slots using a multi-dimensional affinity algorithm:
-   - **Preferred Worktree Slot**: Selected immediately if free.
-   - **Git Commit Match (`head`)**: +100 points
-   - **Cargo Profile Match (`debug`/`release`/custom)**: +40 points
-   - **Target Triple Match (`--target`)**: +40 points
-   - **Git Branch Match (`branch`)**: +30 points
-   - **Fallback**: If all candidate slots are locked, a new slot (`<pool>-N+1`) is created.
-4. **Advisory Locking.** The chosen slot's lock is held by the `carpe` process for the entire
-   `cargo` invocation using [`fd-lock`](https://crates.io/crates/fd-lock) (`flock` on Unix, `LockFileEx` on Windows), then released automatically on exit.
+A leading literal `carpe` token is stripped from the arguments before dispatch,
+so invocations that include the subcommand name work as expected
+(`cargo carpe build` with a `cargo-carpe` executable on `PATH`). Non-building
+Cargo subcommands (`fmt`, `add`, `remove`, `rm`, `metadata`, `tree`, `new`,
+`init`, `publish`, `search`, `login`, `logout`, `owner`, `vendor`, `yank`) are
+forwarded straight to cargo without allocating a slot.
 
-### Environment & Flag Warnings
+## Slot selection & affinity
 
-- If `$CARGO_TARGET_DIR` is set in your environment, `carpe` prints a warning and overrides it with the selected slot.
-- If `--target-dir` is explicitly passed in Cargo CLI arguments, `carpe` warns that Cargo's explicit CLI flag will take precedence over the slot.
+Slots are ranked holistically across all existing slots in the pool; only
+unlocked slots can be chosen.
 
-### Naming
+| Signal | Source | Points |
+| --- | --- | --- |
+| Git `HEAD` match | `head` in `.carpe-meta` vs `git rev-parse HEAD` | `+100` |
+| Preferred slot for this worktree | `carpe-slot` marker in the worktree's git dir | `+75` |
+| Toolchain match | Leading `+toolchain` argument | `+50` |
+| Profile match | `--release` / `-r` / `--profile` / `--profile=...` (default `debug`) | `+40` |
+| Target match | `--target` / `--target=...` | `+40` |
+| Features match | `--features` / `-F` / `--features=...` | `+40` |
+| Branch match | `branch` in `.carpe-meta` vs current branch (detached `HEAD` never matches) | `+20` |
 
-Slots live under standard platform cache directories via [`dirs`](https://crates.io/crates/dirs):
-- **Linux/BSD**: `~/.cache/carpe/<pool>-<n>`
-- **macOS**: `~/Library/Caches/carpe/<pool>-<n>` (or `$XDG_CACHE_HOME/carpe/`)
-- **Windows**: `%LOCALAPPDATA%\carpe\<pool>-<n>`
+Ties are broken by **score descending → timestamp descending → slot index
+ascending**. The chosen slot's `.carpe-meta` is rewritten and the worktree's
+preferred-slot marker is updated. If every candidate is locked, a new slot is
+created at the highest existing index + 1. Each slot's `.carpe-lock` file is
+locked non-blockingly with [`fd-lock`](https://crates.io/crates/fd-lock)
+(`flock` on Unix, `LockFileEx` on Windows) and held until cargo exits.
 
-`<pool>` is `<basename-of-repo>-<8-hex-char-hash-of-the-identity-path>` —
-the hash exists purely to keep two unrelated repos that happen to share a
-directory name (very common: `api`, `server`, `worker`, ...) from colliding.
-The pool hash is a stable FNV-1a value; upgrading from a version that used std's `DefaultHasher` will create a new pool once (old dirs can be removed with `carpe prune -a`).
+## Cache layout
 
-## Example: two worktrees, one busy build
+Pool and slot names are `<sanitized-basename>-<8-hex-hash>` and
+`<pool>-<slot>` respectively. The basename comes from the main worktree root
+(or the Cargo workspace root outside git); the hash is produced by `short_hash`
+— a stable 64-bit FNV-1a hash of the canonicalized repo/workspace identity
+path, truncated to the first 8 hex digits — so unrelated repos sharing a
+directory name (common: `api`, `server`, `worker`, ...) do not collide, and the
+pool name stays the same across Rust releases and toolchains.
 
-```
-$ cd ~/src/myrepo               # main worktree
+Upgrading from a version that used std's `DefaultHasher` changes the hash and
+therefore creates a new pool once; the old directories can be reclaimed with
+`carpe prune -a`.
+
+| OS | Cache root |
+| --- | --- |
+| Linux / BSD | `$XDG_CACHE_HOME/carpe/` if set, otherwise `~/.cache/carpe/` |
+| macOS | `~/Library/Caches/carpe/` (the XDG variable is not used on macOS) |
+| Windows | `%LOCALAPPDATA%\carpe\` |
+
+`carpe` falls back to the system temp directory if the platform cache directory
+cannot be determined. Per-repo metadata lives in the worktree's own git dir
+(or under `<cache-root>/state/` outside git), and is removed with
+`git worktree remove`.
+
+## Environment & warnings
+
+| Variable | Effect |
+| --- | --- |
+| `CARPE_MAX_STORAGE_GB` | Storage budget in GiB for `prune --auto` and the warnings in `status`/`info` (default `128.0`) |
+| `CARPE_CARGO_PATH` | Explicit path to the real cargo executable (highest resolution precedence) |
+| `CARPE_CI`, `CI`, `CONTINUOUS_INTEGRATION` | Mark the environment as CI; disables interactive pruning |
+| `CARGO_HOME` | Cargo bin dir location used by `toggle-override` (`cargo` / `cargo.real`) |
+| `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR` | If non-empty, carpe warns and overrides them with the chosen slot |
+| `PATH` | Used to locate `cargo`, `cargo.real`, and `rustup` |
+
+Passing an explicit `--target-dir` also produces a warning: Cargo's CLI flag
+wins over carpe's slot. A full list of variables, warnings, exit codes, and
+argument normalization rules is in the
+[CLI reference](docs/cli-reference.md).
+
+## Examples
+
+Two worktrees building in parallel:
+
+```console
+$ cd ~/src/myrepo                 # main worktree
 $ carpe build
-carpe: using /home/you/.cache/carpe/myrepo-a1b2c3d4-0
+      Carpe using <cache-root>/carpe/myrepo-a1b2c3d4-0
    Compiling myrepo v0.1.0
-   ...
 
 # meanwhile, in another terminal:
-$ cd ~/src/myrepo-feature-x     # linked worktree, first time
+$ cd ~/src/myrepo-feature-x       # linked worktree, first build
 $ carpe build
-carpe: using /home/you/.cache/carpe/myrepo-a1b2c3d4-1
+      Carpe preferred slot myrepo-a1b2c3d4-0 is busy, using myrepo-a1b2c3d4-1 instead (parallel build)
    Compiling myrepo v0.1.0
-   ...
 
-# next time you build in myrepo-feature-x, slot 1 is free and preferred, so it's reused:
+# later, slot 1 is free and preferred, so it is reused:
 $ carpe build
-carpe: using /home/you/.cache/carpe/myrepo-a1b2c3d4-1
+      Carpe using <cache-root>/carpe/myrepo-a1b2c3d4-1
+    Finished `dev` profile
 ```
 
-```
+Inspect the pool:
+
+```console
 $ carpe status
 Pool:      myrepo-a1b2c3d4
 Marker:    /home/you/src/myrepo/.git/carpe-slot
 Preferred: 0
 
 Slots:
-  myrepo-a1b2c3d4-0         1.2 GB     [free, preferred] (modified: just now)
-  myrepo-a1b2c3d4-1         850.5 MB   [free]            (modified: 10m ago)
+  myrepo-a1b2c3d4-0         1.20 GB    [free, preferred] (modified: just now)
+  myrepo-a1b2c3d4-1       850.0 MB    [free]            (modified: 10m ago)
 
 Total pool size: 2.05 GB
+
+$ carpe info
+Carpe System & Workspace Info:
+------------------------------
+CWD:            /home/you/src/myrepo
+Workspace Root: /home/you/src/myrepo
+Pool Name:      myrepo-a1b2c3d4
+Cache Root:     /home/you/.cache/carpe
+Marker Path:    /home/you/src/myrepo/.git/carpe-slot
+Preferred Slot: 0
+Git Common Dir: /home/you/src/myrepo/.git
+Git Worktree:   /home/you/src/myrepo/.git
+
+Slot Pool Stats: 2 total slots (2 free, 0 busy), total size 2.05 GB
 ```
 
 ## Build & install
 
-`carpe` is published on crates.io and can be installed via Cargo:
+`carpe` is not published on crates.io. Install from this repository or from a
+local checkout:
 
 ```bash
-cargo install carpe
-```
-
-Or install from local source:
-
-```bash
+cargo install --git https://github.com/ChaoticTempest/carpe
 cargo install --path .
 ```
 
