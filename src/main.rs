@@ -16,7 +16,7 @@ use std::fs;
 use std::process::Command;
 
 use prune::run_prune;
-use repo::RepoIdentity;
+use repo::{detect_context, RepoIdentity};
 use slots::{collect_slots, select_slot};
 #[cfg(not(unix))]
 use utils::exit_with_status;
@@ -94,14 +94,14 @@ fn run_cargo(args: &[String]) {
 
     let cwd = env::current_dir().expect("carpe: cannot read current directory");
     let base_dir = extract_manifest_path(args).unwrap_or_else(|| cwd.clone());
-    let identity = RepoIdentity::detect(&base_dir);
+    let (identity, git_state) = detect_context(&base_dir);
     let root = cache_root();
     fs::create_dir_all(&root).expect("carpe: cannot create ~/.cache/carpe");
 
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
 
-    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root, &base_dir, args);
+    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root, &git_state, args);
 
     let env_target_dir = env::var_os("CARGO_TARGET_DIR")
         .or_else(|| env::var_os("CARGO_BUILD_TARGET_DIR"))

@@ -2,28 +2,12 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::repo::run_git;
 use crate::utils::extract_toolchain;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitState {
     pub head: Option<String>,
     pub branch: Option<String>,
-}
-
-impl GitState {
-    pub fn detect(cwd: &Path) -> GitState {
-        if let Some(out) = run_git(cwd, &["rev-parse", "HEAD", "--abbrev-ref", "HEAD"]) {
-            let mut lines = out.lines();
-            let head = lines.next().map(String::from);
-            let branch = lines.next().map(String::from).filter(|b| b != "HEAD");
-            return GitState { head, branch };
-        }
-        GitState {
-            head: None,
-            branch: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

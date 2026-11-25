@@ -20,12 +20,11 @@ pub struct SlotCandidate {
 pub fn select_slot(
     identity: &RepoIdentity,
     root: &Path,
-    cwd: &Path,
+    git_state: &GitState,
     args: &[String],
 ) -> (usize, PathBuf, lockfile::Lock) {
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
-    let git_state = GitState::detect(cwd);
     let build_state = CargoBuildState::parse(args);
 
     let candidates = existing_slot_indices(root, &dir_name);
@@ -278,11 +277,13 @@ mod tests {
         let main_identity = RepoIdentity::detect(&main_repo);
         let wt_identity = RepoIdentity::detect(&wt_repo);
 
-        let (slot_a, path_a, lock_a) = select_slot(&main_identity, &cache_temp, &main_repo, &[]);
+        let (slot_a, path_a, lock_a) =
+            select_slot(&main_identity, &cache_temp, &GitState::default(), &[]);
         assert_eq!(slot_a, 0, "First worktree build should allocate slot 0");
         assert!(path_a.ends_with(format!("{}-0", main_identity.pool_name())));
 
-        let (slot_b, path_b, lock_b) = select_slot(&wt_identity, &cache_temp, &wt_repo, &[]);
+        let (slot_b, path_b, lock_b) =
+            select_slot(&wt_identity, &cache_temp, &GitState::default(), &[]);
         assert_eq!(
             slot_b, 1,
             "Second worktree should fall back to slot 1 when slot 0 is locked"
@@ -294,13 +295,15 @@ mod tests {
         drop(lock_a);
         drop(lock_b);
 
-        let (slot_b2, _, lock_b2) = select_slot(&wt_identity, &cache_temp, &wt_repo, &[]);
+        let (slot_b2, _, lock_b2) =
+            select_slot(&wt_identity, &cache_temp, &GitState::default(), &[]);
         assert_eq!(
             slot_b2, 1,
             "Worktree B should reuse preferred slot 1 when free"
         );
 
-        let (slot_a2, _, lock_a2) = select_slot(&main_identity, &cache_temp, &main_repo, &[]);
+        let (slot_a2, _, lock_a2) =
+            select_slot(&main_identity, &cache_temp, &GitState::default(), &[]);
         assert_eq!(
             slot_a2, 0,
             "Worktree A should reuse preferred slot 0 when free"
