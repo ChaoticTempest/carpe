@@ -15,6 +15,11 @@ use std::env;
 use std::fs;
 use std::process::Command;
 
+#[cfg(unix)]
+type LockFd = std::os::fd::RawFd;
+#[cfg(not(unix))]
+type LockFd = ();
+
 use prune::run_prune;
 use repo::RepoIdentity;
 use slots::{collect_slots, select_slot};
@@ -89,7 +94,7 @@ fn run_cargo(args: &[String]) {
     if is_non_building_subcommand(args) {
         let mut cmd = real_cargo_cmd(args);
         cmd.args(args);
-        spawn_or_exec_cargo(cmd);
+        spawn_or_exec_cargo(cmd, None);
     }
 
     let cwd = env::current_dir().expect("carpe: cannot read current directory");
@@ -101,7 +106,7 @@ fn run_cargo(args: &[String]) {
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
 
-    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root, &base_dir, args);
+    let (slot_idx, slot_path, lock) = select_slot(&identity, &root, &base_dir, args);
 
     let env_target_dir = env::var_os("CARGO_TARGET_DIR")
         .or_else(|| env::var_os("CARGO_BUILD_TARGET_DIR"))
@@ -139,13 +144,33 @@ fn run_cargo(args: &[String]) {
 
     let mut cmd = real_cargo_cmd(args);
     cmd.args(args).env("CARGO_TARGET_DIR", &slot_path);
-    spawn_or_exec_cargo(cmd);
+    spawn_or_exec_cargo(cmd, lock_fd_for_exec(&lock));
 }
 
-fn spawn_or_exec_cargo(mut cmd: Command) -> ! {
+// Only Unix exec needs the lock FD; on other platforms the lock is simply
+// held by the parent until spawn+wait finishes.
+#[cfg(unix)]
+fn lock_fd_for_exec(lock: &lockfile::Lock) -> Option<LockFd> {
+    Some(lock.raw_fd())
+}
+
+#[cfg(not(unix))]
+fn lock_fd_for_exec(_lock: &lockfile::Lock) -> Option<LockFd> {
+    None
+}
+
+fn spawn_or_exec_cargo(mut cmd: Command, lock_fd: Option<LockFd>) -> ! {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        if let Some(fd) = lock_fd {
+            // Clear CLOEXEC in the would-be cargo image so the flock on the
+            // slot lock survives exec(); otherwise the slot is unlocked for
+            // the entire build and another carpe can steal it.
+            unsafe {
+                cmd.pre_exec(move || lockfile::clear_cloexec(fd));
+            }
+        }
         let err = cmd.exec();
         eprintln!("carpe: failed to exec cargo: {err}");
         std::process::exit(1);
@@ -153,6 +178,7 @@ fn spawn_or_exec_cargo(mut cmd: Command) -> ! {
 
     #[cfg(not(unix))]
     {
+        let _ = lock_fd; // no exec on non-Unix; spawn+wait semantics unchanged
         let status = cmd
             .status()
             .expect("carpe: failed to spawn cargo (is it in PATH?)");
