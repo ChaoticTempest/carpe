@@ -61,6 +61,7 @@ Slots live under standard platform cache directories via [`dirs`](https://crates
 `<pool>` is `<basename-of-repo>-<8-hex-char-hash-of-the-identity-path>` —
 the hash exists purely to keep two unrelated repos that happen to share a
 directory name (very common: `api`, `server`, `worker`, ...) from colliding.
+The pool hash is a stable FNV-1a value; upgrading from a version that used std's `DefaultHasher` will create a new pool once (old dirs can be removed with `carpe prune -a`).
 
 ## Example: two worktrees, one busy build
 
