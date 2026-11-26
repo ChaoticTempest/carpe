@@ -40,7 +40,7 @@ impl Lock {
 /// Only the CLOEXEC bit is cleared; all other FD flags are preserved.
 #[cfg(unix)]
 pub fn clear_cloexec(raw_fd: RawFd) -> io::Result<()> {
-    use libc::{fcntl, FD_CLOEXEC, F_GETFD, F_SETFD};
+    use libc::{F_GETFD, F_SETFD, FD_CLOEXEC, fcntl};
 
     // SAFETY: `fcntl` with F_GETFD/F_SETFD only touches the given FD and has no
     // pointer arguments.

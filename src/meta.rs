@@ -13,16 +13,13 @@ pub struct GitState {
 
 impl GitState {
     pub fn detect(cwd: &Path) -> GitState {
-        if let Some(out) = run_git(cwd, &["rev-parse", "HEAD", "--abbrev-ref", "HEAD"]) {
-            let mut lines = out.lines();
-            let head = lines.next().map(String::from);
-            let branch = lines.next().map(String::from).filter(|b| b != "HEAD");
-            return GitState { head, branch };
-        }
-        GitState {
-            head: None,
-            branch: None,
-        }
+        let Some(out) = run_git(cwd, &["rev-parse", "HEAD", "--abbrev-ref", "HEAD"]) else {
+            return GitState::default();
+        };
+        let mut lines = out.lines();
+        let head = lines.next().map(String::from);
+        let branch = lines.next().map(String::from).filter(|b| b != "HEAD");
+        GitState { head, branch }
     }
 }
 
@@ -46,25 +43,25 @@ impl CargoBuildState {
             let arg = &sub_args[i];
             if arg == "--release" || arg == "-r" {
                 profile = Some("release".to_string());
-            } else if arg == "--profile" {
-                if i + 1 < sub_args.len() {
-                    profile = Some(sub_args[i + 1].clone());
-                    i += 1;
-                }
+            } else if arg == "--profile"
+                && let Some(val) = sub_args.get(i + 1)
+            {
+                profile = Some(val.clone());
+                i += 1;
             } else if let Some(p) = arg.strip_prefix("--profile=") {
                 profile = Some(p.to_string());
-            } else if arg == "--target" {
-                if i + 1 < sub_args.len() {
-                    target = Some(sub_args[i + 1].clone());
-                    i += 1;
-                }
+            } else if arg == "--target"
+                && let Some(val) = sub_args.get(i + 1)
+            {
+                target = Some(val.clone());
+                i += 1;
             } else if let Some(t) = arg.strip_prefix("--target=") {
                 target = Some(t.to_string());
-            } else if arg == "--features" || arg == "-F" {
-                if i + 1 < sub_args.len() {
-                    features = Some(sub_args[i + 1].clone());
-                    i += 1;
-                }
+            } else if (arg == "--features" || arg == "-F")
+                && let Some(val) = sub_args.get(i + 1)
+            {
+                features = Some(val.clone());
+                i += 1;
             } else if let Some(f) = arg.strip_prefix("--features=") {
                 features = Some(f.to_string());
             }
@@ -101,22 +98,22 @@ impl SlotMeta {
         let mut meta = SlotMeta::default();
         for line in content.lines() {
             let line = line.trim();
-            if let Some(val) = line.strip_prefix("head=") {
-                meta.head = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("branch=") {
-                meta.branch = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("toolchain=") {
-                meta.toolchain = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("profile=") {
-                meta.profile = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("target=") {
-                meta.target = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("features=") {
-                meta.features = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("timestamp=") {
-                if let Ok(ts) = val.parse::<u64>() {
-                    meta.timestamp = ts;
+            let Some((key, val)) = line.split_once('=') else {
+                continue;
+            };
+            match key {
+                "head" => meta.head = Some(val.to_string()),
+                "branch" => meta.branch = Some(val.to_string()),
+                "toolchain" => meta.toolchain = Some(val.to_string()),
+                "profile" => meta.profile = Some(val.to_string()),
+                "target" => meta.target = Some(val.to_string()),
+                "features" => meta.features = Some(val.to_string()),
+                "timestamp" => {
+                    if let Ok(ts) = val.parse::<u64>() {
+                        meta.timestamp = ts;
+                    }
                 }
+                _ => {}
             }
         }
         Some(meta)
@@ -151,28 +148,23 @@ impl SlotMeta {
     }
 
     pub fn score(&self, current_git: &GitState, current_build: &CargoBuildState) -> u32 {
-        let mut score = 0;
-        if matches!((&self.head, &current_git.head), (Some(h1), Some(h2)) if h1 == h2) {
-            score += 100;
-        }
-        if matches!((&self.toolchain, &current_build.toolchain), (Some(tc1), Some(tc2)) if tc1 == tc2)
-        {
-            score += 50;
-        }
-        if matches!((&self.profile, &current_build.profile), (Some(p1), Some(p2)) if p1 == p2) {
-            score += 40;
-        }
-        if matches!((&self.target, &current_build.target), (Some(t1), Some(t2)) if t1 == t2) {
-            score += 40;
-        }
-        if matches!((&self.features, &current_build.features), (Some(f1), Some(f2)) if f1 == f2) {
-            score += 40;
-        }
-        if matches!((&self.branch, &current_git.branch), (Some(b1), Some(b2)) if b1 == b2) {
-            score += 20;
-        }
-        score
+        [
+            (eq_some(&self.head, &current_git.head), 100),
+            (eq_some(&self.toolchain, &current_build.toolchain), 50),
+            (eq_some(&self.profile, &current_build.profile), 40),
+            (eq_some(&self.target, &current_build.target), 40),
+            (eq_some(&self.features, &current_build.features), 40),
+            (eq_some(&self.branch, &current_git.branch), 20),
+        ]
+        .into_iter()
+        .filter_map(|(same, weight)| same.then_some(weight))
+        .sum()
     }
+}
+
+/// Two optional values contribute affinity only when both are present and equal.
+fn eq_some(a: &Option<String>, b: &Option<String>) -> bool {
+    matches!((a, b), (Some(a), Some(b)) if a == b)
 }
 
 #[cfg(test)]

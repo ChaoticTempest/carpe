@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -78,23 +79,29 @@ pub fn has_explicit_target_dir_flag(args: &[String]) -> bool {
 }
 
 pub fn extract_manifest_path(args: &[String]) -> Option<PathBuf> {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--manifest-path" {
-            if i + 1 < args.len() {
-                let p = PathBuf::from(&args[i + 1]);
-                return p.parent().map(Path::to_path_buf);
-            }
-        } else if let Some(path_str) = args[i].strip_prefix("--manifest-path=") {
-            let p = PathBuf::from(path_str);
-            return p.parent().map(Path::to_path_buf);
+    let parent = |path: &str| PathBuf::from(path).parent().map(Path::to_path_buf);
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--manifest-path"
+            && let Some(next) = args.get(i + 1)
+        {
+            return parent(next);
         }
-        i += 1;
+        if let Some(path_str) = arg.strip_prefix("--manifest-path=") {
+            return parent(path_str);
+        }
     }
     None
 }
 
 pub fn normalize_args(raw_args: Vec<String>) -> Vec<String> {
+    const SPLIT_FLAGS: &[&str] = &[
+        "--features",
+        "--package",
+        "--target",
+        "--profile",
+        "--manifest-path",
+    ];
+
     let args = if raw_args.len() == 1 && raw_args[0].contains(' ') {
         shell_words::split(&raw_args[0]).unwrap_or(raw_args)
     } else {
@@ -103,20 +110,10 @@ pub fn normalize_args(raw_args: Vec<String>) -> Vec<String> {
 
     let mut normalized = Vec::new();
     for arg in args {
-        if let Some(rest) = arg.strip_prefix("--features ") {
-            normalized.push("--features".to_string());
-            normalized.push(rest.trim().to_string());
-        } else if let Some(rest) = arg.strip_prefix("--package ") {
-            normalized.push("--package".to_string());
-            normalized.push(rest.trim().to_string());
-        } else if let Some(rest) = arg.strip_prefix("--target ") {
-            normalized.push("--target".to_string());
-            normalized.push(rest.trim().to_string());
-        } else if let Some(rest) = arg.strip_prefix("--profile ") {
-            normalized.push("--profile".to_string());
-            normalized.push(rest.trim().to_string());
-        } else if let Some(rest) = arg.strip_prefix("--manifest-path ") {
-            normalized.push("--manifest-path".to_string());
+        if let Some((flag, rest)) = arg.split_once(' ')
+            && SPLIT_FLAGS.contains(&flag)
+        {
+            normalized.push(flag.to_string());
             normalized.push(rest.trim().to_string());
         } else {
             normalized.push(arg);
@@ -126,10 +123,10 @@ pub fn normalize_args(raw_args: Vec<String>) -> Vec<String> {
 }
 
 pub fn cargo_bin_dir() -> PathBuf {
-    if let Ok(cargo_home) = env::var("CARGO_HOME") {
-        if !cargo_home.trim().is_empty() {
-            return PathBuf::from(cargo_home).join("bin");
-        }
+    if let Ok(cargo_home) = env::var("CARGO_HOME")
+        && !cargo_home.trim().is_empty()
+    {
+        return PathBuf::from(cargo_home).join("bin");
     }
 
     let default_home_bin = dirs::home_dir()
@@ -142,11 +139,9 @@ pub fn cargo_bin_dir() -> PathBuf {
     }
 
     if let Ok(path_os) = env::var("PATH") {
-        for dir in env::split_paths(&path_os) {
-            let candidate = dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
-            if candidate.is_file() {
-                return dir;
-            }
+        let cargo_name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        if let Some(dir) = env::split_paths(&path_os).find(|dir| dir.join(cargo_name).is_file()) {
+            return dir;
         }
     }
 
@@ -171,76 +166,59 @@ pub fn which_bin(name: &str) -> Option<PathBuf> {
     } else {
         name.to_string()
     };
-    if let Ok(path_os) = env::var("PATH") {
-        for dir in env::split_paths(&path_os) {
-            let candidate = dir.join(&filename);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    let path_os = env::var("PATH").ok()?;
+    env::split_paths(&path_os)
+        .find(|dir| dir.join(&filename).is_file())
+        .map(|dir| dir.join(&filename))
 }
 
 pub fn real_cargo_cmd(args: &[String]) -> Command {
     if let Ok(path) = env::var("CARPE_CARGO_PATH") {
-        let mut cmd = Command::new(path);
-        cmd.env("_CARPE_RECURSION_GUARD", "1");
-        return cmd;
+        return Command::new(path);
     }
 
     let backup = cargo_backup_path();
     if backup.is_file() {
-        let mut cmd = Command::new(backup);
-        cmd.env("_CARPE_RECURSION_GUARD", "1");
-        return cmd;
+        return Command::new(backup);
     }
 
     let (toolchain_opt, _) = extract_toolchain(args);
-    if let Some(toolchain) = toolchain_opt {
-        if let Some(rustup_path) = which_bin("rustup") {
-            let mut cmd = Command::new(rustup_path);
-            cmd.arg(format!("+{toolchain}")).arg("cargo");
-            cmd.env("_CARPE_RECURSION_GUARD", "1");
-            return cmd;
+    if let Some(toolchain) = toolchain_opt
+        && let Some(rustup_path) = which_bin("rustup")
+    {
+        let mut cmd = Command::new(rustup_path);
+        cmd.arg(format!("+{toolchain}")).arg("cargo");
+        return cmd;
+    }
+
+    // Both remaining strategies must avoid selecting carpe itself as cargo.
+    let Ok(cur_exe) = env::current_exe() else {
+        return Command::new("cargo");
+    };
+    let cur_canon = canonicalize_best_effort(&cur_exe);
+
+    if let Ok(out) = Command::new("rustup").arg("which").arg("cargo").output()
+        && out.status.success()
+        && let Ok(path_str) = String::from_utf8(out.stdout)
+    {
+        let path = PathBuf::from(path_str.trim());
+        if path.is_file() && canonicalize_best_effort(&path) != cur_canon {
+            return Command::new(path);
         }
     }
 
-    if let Ok(rustup_cargo) = Command::new("rustup").arg("which").arg("cargo").output() {
-        if rustup_cargo.status.success() {
-            if let Ok(path_str) = String::from_utf8(rustup_cargo.stdout) {
-                let path = PathBuf::from(path_str.trim());
-                if let Ok(cur_exe) = env::current_exe() {
-                    let cur_canon = canonicalize_best_effort(&cur_exe);
-                    let path_canon = canonicalize_best_effort(&path);
-                    if path_canon != cur_canon && path.is_file() {
-                        let mut cmd = Command::new(path);
-                        cmd.env("_CARPE_RECURSION_GUARD", "1");
-                        return cmd;
-                    }
-                }
-            }
-        }
+    let cargo_name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+    if let Ok(path_os) = env::var("PATH")
+        && let Some(candidate) = env::split_paths(&path_os)
+            .map(|dir| dir.join(cargo_name))
+            .find(|candidate| {
+                candidate.is_file() && canonicalize_best_effort(candidate) != cur_canon
+            })
+    {
+        return Command::new(candidate);
     }
 
-    if let Ok(cur_exe) = env::current_exe() {
-        let cur_canon = canonicalize_best_effort(&cur_exe);
-        if let Ok(path_os) = env::var("PATH") {
-            for dir in env::split_paths(&path_os) {
-                let candidate = dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
-                let candidate_canon = canonicalize_best_effort(&candidate);
-                if candidate_canon != cur_canon && candidate.is_file() {
-                    let mut cmd = Command::new(candidate);
-                    cmd.env("_CARPE_RECURSION_GUARD", "1");
-                    return cmd;
-                }
-            }
-        }
-    }
-
-    let mut cmd = Command::new("cargo");
-    cmd.env("_CARPE_RECURSION_GUARD", "1");
-    cmd
+    Command::new("cargo")
 }
 
 pub fn is_override_enabled() -> bool {
@@ -300,11 +278,12 @@ pub fn run_toggle_override() {
 }
 
 pub fn extract_toolchain(args: &[String]) -> (Option<String>, &[String]) {
-    if let Some(first) = args.first() {
-        if first.starts_with('+') && first.len() > 1 {
-            let toolchain = first[1..].to_string();
-            return (Some(toolchain), &args[1..]);
-        }
+    if let Some(first) = args.first()
+        && first.starts_with('+')
+        && first.len() > 1
+    {
+        let toolchain = first[1..].to_string();
+        return (Some(toolchain), &args[1..]);
     }
     (None, args)
 }
@@ -335,14 +314,19 @@ pub fn is_non_building_subcommand(args: &[String]) -> bool {
     )
 }
 
+/// CI detection with an injectable environment reader, so it can be tested
+/// without mutating process-wide environment variables.
+fn is_ci_env_with(get: impl Fn(&str) -> Option<OsString>) -> bool {
+    let truthy = |key: &str| {
+        get(key)
+            .and_then(|value| value.into_string().ok())
+            .is_some_and(|value| value == "true" || value == "1")
+    };
+    truthy("CI") || truthy("CARPE_CI") || get("CONTINUOUS_INTEGRATION").is_some()
+}
+
 pub fn is_ci_environment() -> bool {
-    env::var("CI")
-        .map(|s| s == "true" || s == "1")
-        .unwrap_or(false)
-        || env::var("CARPE_CI")
-            .map(|s| s == "true" || s == "1")
-            .unwrap_or(false)
-        || env::var_os("CONTINUOUS_INTEGRATION").is_some()
+    is_ci_env_with(|key| env::var_os(key))
 }
 
 #[cfg(not(unix))]
@@ -360,44 +344,48 @@ pub fn test_rand_nonce() -> u64 {
 }
 
 pub fn dir_size(path: &Path) -> u64 {
-    let mut size = 0;
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
             let p = entry.path();
             // One metadata call per entry (fs::metadata follows symlinks, as
             // Path::is_dir and Path::metadata did before).
             if let Ok(meta) = fs::metadata(&p) {
                 if meta.is_dir() {
-                    size += dir_size(&p);
+                    dir_size(&p)
                 } else {
-                    size += meta.len();
+                    meta.len()
                 }
+            } else {
+                0
             }
-        }
-    }
-    size
+        })
+        .sum()
 }
 
 pub fn slot_mtime(path: &Path) -> Option<SystemTime> {
-    let meta_path = path.join(".carpe-meta");
-    if let Ok(content) = fs::read_to_string(&meta_path) {
-        for line in content.lines() {
-            if let Some(val) = line.strip_prefix("timestamp=") {
-                if let Ok(ts) = val.parse::<u64>() {
-                    return Some(UNIX_EPOCH + std::time::Duration::from_secs(ts));
-                }
-            }
-        }
+    if let Some(ts) = crate::meta::SlotMeta::read(path)
+        .filter(|meta| meta.timestamp > 0)
+        .map(|meta| meta.timestamp)
+    {
+        return Some(UNIX_EPOCH + std::time::Duration::from_secs(ts));
     }
     fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
-pub fn check_storage_budget(total_bytes: u64) {
-    let max_gb: f64 = env::var("CARPE_MAX_STORAGE_GB")
+/// Storage budget in GB, shared by the status/info warning and auto-prune.
+pub fn max_storage_gb() -> f64 {
+    env::var("CARPE_MAX_STORAGE_GB")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(128.0);
+        .unwrap_or(128.0)
+}
 
+pub fn check_storage_budget(total_bytes: u64) {
+    let max_gb = max_storage_gb();
     let max_bytes = (max_gb * 1024.0 * 1024.0 * 1024.0) as u64;
 
     if total_bytes > max_bytes {
@@ -565,9 +553,21 @@ mod tests {
 
     #[test]
     fn test_is_ci_environment() {
-        env::set_var("CARPE_CI", "true");
-        assert!(is_ci_environment());
-        env::remove_var("CARPE_CI");
+        let ci_with = |vars: &[(&str, &str)]| {
+            is_ci_env_with(|key| {
+                vars.iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| OsString::from(*value))
+            })
+        };
+        assert!(ci_with(&[("CI", "true")]));
+        assert!(ci_with(&[("CI", "1")]));
+        assert!(ci_with(&[("CARPE_CI", "true")]));
+        assert!(ci_with(&[("CARPE_CI", "1")]));
+        assert!(ci_with(&[("CONTINUOUS_INTEGRATION", "")]));
+        assert!(!ci_with(&[("CI", "false")]));
+        assert!(!ci_with(&[]));
+        assert_eq!(is_ci_environment(), is_ci_env_with(|key| env::var_os(key)));
     }
 
     #[test]

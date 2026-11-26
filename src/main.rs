@@ -192,20 +192,27 @@ fn spawn_or_exec_cargo(mut cmd: Command, lock_fd: Option<LockFd>) -> ! {
     }
 }
 
+/// Shared display strings for the pool, marker, and preferred slot lines.
+fn pool_banner(identity: &RepoIdentity, pool_name: &str) -> (String, String, String) {
+    (
+        cyan(pool_name),
+        dim(identity.marker_path().display()),
+        identity
+            .read_preferred_slot()
+            .map(green)
+            .unwrap_or_else(|| dim("none")),
+    )
+}
+
 fn run_status() {
     let cwd = env::current_dir().expect("carpe: cannot read current directory");
     let identity = RepoIdentity::detect(&cwd);
     let pool_name = identity.pool_name();
+    let (pool, marker, preferred) = pool_banner(&identity, &pool_name);
 
-    println!("Pool:      {}", cyan(&pool_name));
-    println!("Marker:    {}", dim(identity.marker_path().display()));
-    println!(
-        "Preferred: {}",
-        identity
-            .read_preferred_slot()
-            .map(green)
-            .unwrap_or_else(|| dim("none"))
-    );
+    println!("Pool:      {pool}");
+    println!("Marker:    {marker}");
+    println!("Preferred: {preferred}");
 
     let root = cache_root();
     if !root.exists() {
@@ -250,23 +257,20 @@ fn run_info() {
     let identity = RepoIdentity::detect(&cwd);
     let pool_name = identity.pool_name();
     let root = cache_root();
-    let git_common = repo::git_common_dir(&cwd);
-    let git_dir = repo::git_dir(&cwd);
+    let (pool, marker, preferred) = pool_banner(&identity, &pool_name);
+    let (git_common, git_dir) = match repo::git_dirs(&cwd) {
+        Some((common, worktree)) => (Some(common), Some(worktree)),
+        None => (None, None),
+    };
 
     println!("{}", bold("Carpe System & Workspace Info:"));
     println!("{}", dim("------------------------------"));
     println!("CWD:            {}", cwd.display());
     println!("Workspace Root: {}", identity.name_source.display());
-    println!("Pool Name:      {}", cyan(&pool_name));
+    println!("Pool Name:      {pool}");
     println!("Cache Root:     {}", dim(root.display()));
-    println!("Marker Path:    {}", dim(identity.marker_path().display()));
-    println!(
-        "Preferred Slot: {}",
-        identity
-            .read_preferred_slot()
-            .map(green)
-            .unwrap_or_else(|| dim("none"))
-    );
+    println!("Marker Path:    {marker}");
+    println!("Preferred Slot: {preferred}");
 
     if let Some(common) = git_common {
         println!("Git Common Dir: {}", dim(common.display()));

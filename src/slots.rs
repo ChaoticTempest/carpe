@@ -47,12 +47,12 @@ fn allocate_new_slot(dir_name: &str, root: &Path) -> io::Result<(usize, PathBuf,
             .unwrap_or(0)
             .max(min_next);
         if next >= MAX_NEW_SLOT_ATTEMPTS {
-            next = match (0..MAX_NEW_SLOT_ATTEMPTS)
-                .find(|idx| !tried[*idx] && !indices.contains(idx))
-            {
-                Some(idx) => idx,
-                None => break,
+            let Some(idx) =
+                (0..MAX_NEW_SLOT_ATTEMPTS).find(|idx| !tried[*idx] && !indices.contains(idx))
+            else {
+                break;
             };
+            next = idx;
         }
         tried[next] = true;
         min_next = next.saturating_add(1);
@@ -152,19 +152,19 @@ pub fn select_slot(
 
 pub fn existing_slot_indices(root: &Path, pool_name: &str) -> Vec<usize> {
     let prefix = format!("{pool_name}-");
-    let mut out = Vec::new();
-    if let Ok(entries) = fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let s = name.to_string_lossy();
-            if let Some(rest) = s.strip_prefix(&prefix) {
-                if let Ok(idx) = rest.parse::<usize>() {
-                    out.push(idx);
-                }
-            }
-        }
-    }
-    out
+    fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.parse().ok())
+        })
+        .collect()
 }
 
 pub fn collect_slots(
@@ -172,56 +172,45 @@ pub fn collect_slots(
     filter_pool: Option<&str>,
     preferred: Option<usize>,
 ) -> Vec<SlotCandidate> {
-    let mut candidates = Vec::new();
-    let entries = match fs::read_dir(root) {
-        Ok(e) => e,
-        Err(_) => return candidates,
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
     };
+    let prefix = filter_pool.map(|pool| format!("{pool}-"));
+    let preferred_name = filter_pool
+        .zip(preferred)
+        .map(|(pool, idx)| format!("{pool}-{idx}"));
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-
-        if let Some(pool) = filter_pool {
-            let prefix = format!("{pool}-");
-            if !name.starts_with(&prefix) {
-                continue;
+    let mut candidates: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if let Some(prefix) = &prefix
+                && !name
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.parse::<usize>().is_ok())
+            {
+                return None;
             }
-            let rest = &name[prefix.len()..];
-            if rest.parse::<usize>().is_err() {
-                continue;
-            }
-        }
 
-        let lock_path = path.join(".carpe-lock");
-        let is_busy = !matches!(lockfile::try_lock(&lock_path), Ok(Some(_)));
+            let is_busy = !matches!(lockfile::try_lock(&path.join(".carpe-lock")), Ok(Some(_)));
+            let is_preferred = preferred_name
+                .as_ref()
+                .is_some_and(|preferred| name.as_ref() == preferred.as_str());
+            let size_bytes = dir_size(&path);
+            let mtime = slot_mtime(&path);
 
-        let size = dir_size(&path);
-        let mtime = slot_mtime(&path);
-
-        let is_preferred = if let Some(pool) = filter_pool {
-            if let Some(pref_idx) = preferred {
-                name == format!("{pool}-{pref_idx}")
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        candidates.push(SlotCandidate {
-            name: name.into_owned(),
-            path,
-            size_bytes: size,
-            mtime,
-            is_busy,
-            is_preferred,
-        });
-    }
+            Some(SlotCandidate {
+                name: name.into_owned(),
+                path,
+                size_bytes,
+                mtime,
+                is_busy,
+                is_preferred,
+            })
+        })
+        .collect();
 
     candidates.sort_by(|a, b| a.name.cmp(&b.name));
     candidates
@@ -617,9 +606,11 @@ mod tests {
             existing_slot_indices(&cache_root, &pool_name).len(),
             MAX_NEW_SLOT_ATTEMPTS
         );
-        assert!(!cache_root
-            .join(format!("{pool_name}-{MAX_NEW_SLOT_ATTEMPTS}"))
-            .exists());
+        assert!(
+            !cache_root
+                .join(format!("{pool_name}-{MAX_NEW_SLOT_ATTEMPTS}"))
+                .exists()
+        );
 
         drop(held_locks);
         let _ = fs::remove_dir_all(&root_dir);

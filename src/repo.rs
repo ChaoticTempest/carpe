@@ -90,14 +90,6 @@ pub fn git_dirs(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
     Some((resolve(cwd, common_raw), resolve(cwd, worktree_raw)))
 }
 
-pub fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
-    git_dirs(cwd).map(|(common, _)| common)
-}
-
-pub fn git_dir(cwd: &Path) -> Option<PathBuf> {
-    git_dirs(cwd).map(|(_, worktree)| worktree)
-}
-
 pub fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .args(args)
@@ -114,11 +106,7 @@ pub fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
 
 fn resolve(cwd: &Path, raw: &str) -> PathBuf {
     let p = PathBuf::from(raw);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
+    if p.is_absolute() { p } else { cwd.join(p) }
 }
 
 pub fn find_cargo_workspace_root(cwd: &Path) -> Option<PathBuf> {
@@ -132,10 +120,8 @@ pub fn find_cargo_workspace_root(cwd: &Path) -> Option<PathBuf> {
                 top_root = Some(current.clone());
             }
 
-            if let Ok(content) = fs::read_to_string(&manifest) {
-                if content.contains("[workspace]") {
-                    top_root = Some(current.clone());
-                }
+            if fs::read_to_string(&manifest).is_ok_and(|content| content.contains("[workspace]")) {
+                top_root = Some(current.clone());
             }
         }
 

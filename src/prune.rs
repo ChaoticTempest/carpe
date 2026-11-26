@@ -2,13 +2,14 @@ use std::env;
 use std::fs;
 use std::time::SystemTime;
 
-use dialoguer::{console, theme::ColorfulTheme, MultiSelect};
+use dialoguer::{MultiSelect, console, theme::ColorfulTheme};
 
 use crate::lockfile;
 use crate::repo::RepoIdentity;
-use crate::slots::{collect_slots, SlotCandidate};
+use crate::slots::{SlotCandidate, collect_slots};
 use crate::utils::{
-    cache_root, cyan, format_size, format_time_ago, green, is_ci_environment, yellow,
+    cache_root, cyan, format_size, format_time_ago, green, is_ci_environment, max_storage_gb,
+    yellow,
 };
 
 pub fn run_prune(args: &[String]) {
@@ -74,16 +75,51 @@ pub fn run_prune(args: &[String]) {
         }
         run_interactive_prune(&mut slots, dry_run);
     } else if auto_prune {
-        let max_gb: f64 = env::var("CARPE_MAX_STORAGE_GB")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(128.0);
-        run_auto_prune(&mut slots, max_gb, dry_run);
+        run_auto_prune(&mut slots, max_storage_gb(), dry_run);
     } else if let Some(keep_count) = lru {
         run_lru_prune(&mut slots, keep_count, dry_run);
     } else {
         run_default_prune(&slots, dry_run);
     }
+}
+
+fn dry_run_prefix(dry_run: bool) -> &'static str {
+    if dry_run { "[dry-run] " } else { "" }
+}
+
+/// Prune every candidate, returning (number pruned, bytes reclaimed).
+fn prune_slots<'a>(
+    slots: impl IntoIterator<Item = &'a SlotCandidate>,
+    dry_run: bool,
+) -> (usize, u64) {
+    prune_slots_with_budget(slots, dry_run, None)
+}
+
+/// As `prune_slots`, but stop once the tracked cache size is within budget.
+fn prune_slots_with_budget<'a>(
+    slots: impl IntoIterator<Item = &'a SlotCandidate>,
+    dry_run: bool,
+    budget: Option<(u64, u64)>,
+) -> (usize, u64) {
+    let mut remaining = budget.map(|(total, _)| total);
+    let mut pruned_count = 0;
+    let mut total_reclaimed = 0u64;
+
+    for slot in slots {
+        if let Some(max_bytes) = budget.map(|(_, max)| max)
+            && remaining.is_some_and(|size| size <= max_bytes)
+        {
+            break;
+        }
+        if let Some(size) = try_prune_slot(slot, dry_run) {
+            pruned_count += 1;
+            total_reclaimed += size;
+            if let Some(remaining) = remaining.as_mut() {
+                *remaining = remaining.saturating_sub(size);
+            }
+        }
+    }
+    (pruned_count, total_reclaimed)
 }
 
 pub fn run_interactive_prune(slots: &mut [SlotCandidate], dry_run: bool) {
@@ -132,17 +168,10 @@ pub fn run_interactive_prune(slots: &mut [SlotCandidate], dry_run: bool) {
         return;
     }
 
-    let mut pruned_count = 0;
-    let mut total_reclaimed = 0u64;
+    let (pruned_count, total_reclaimed) =
+        prune_slots(selection.iter().map(|&idx| &slots[idx]), dry_run);
 
-    for &idx in &selection {
-        if let Some(size) = try_prune_slot(&slots[idx], dry_run) {
-            pruned_count += 1;
-            total_reclaimed += size;
-        }
-    }
-
-    let prefix = if dry_run { "[dry-run] " } else { "" };
+    let prefix = dry_run_prefix(dry_run);
     println!(
         "\n{prefix}Done: pruned {pruned_count} slots, reclaimed {}.",
         format_size(total_reclaimed)
@@ -151,7 +180,7 @@ pub fn run_interactive_prune(slots: &mut [SlotCandidate], dry_run: bool) {
 
 pub fn run_auto_prune(slots: &mut [SlotCandidate], max_gb: f64, dry_run: bool) {
     let max_bytes = (max_gb * 1024.0 * 1024.0 * 1024.0) as u64;
-    let mut total_size: u64 = slots.iter().map(|s| s.size_bytes).sum();
+    let total_size: u64 = slots.iter().map(|s| s.size_bytes).sum();
 
     if total_size <= max_bytes {
         println!(
@@ -169,26 +198,14 @@ pub fn run_auto_prune(slots: &mut [SlotCandidate], max_gb: f64, dry_run: bool) {
         t_a.cmp(&t_b)
     });
 
-    let mut pruned_count = 0;
-    let mut total_reclaimed = 0u64;
+    let (pruned_count, total_reclaimed) =
+        prune_slots_with_budget(free_slots, dry_run, Some((total_size, max_bytes)));
 
-    for slot in free_slots {
-        if total_size <= max_bytes {
-            break;
-        }
-
-        if let Some(size) = try_prune_slot(slot, dry_run) {
-            pruned_count += 1;
-            total_reclaimed += size;
-            total_size = total_size.saturating_sub(size);
-        }
-    }
-
-    let prefix = if dry_run { "[dry-run] " } else { "" };
+    let prefix = dry_run_prefix(dry_run);
     println!(
         "{prefix}Auto Prune: pruned {pruned_count} older slots, reclaimed {} (new cache size: {}).",
         format_size(total_reclaimed),
-        format_size(total_size)
+        format_size(total_size.saturating_sub(total_reclaimed))
     );
 }
 
@@ -209,18 +226,10 @@ pub fn run_lru_prune(slots: &mut [SlotCandidate], keep_num: usize, dry_run: bool
         return;
     }
 
-    let to_prune = &free_slots[keep_num..];
-    let mut pruned_count = 0;
-    let mut total_reclaimed = 0u64;
+    let (pruned_count, total_reclaimed) =
+        prune_slots(free_slots[keep_num..].iter().copied(), dry_run);
 
-    for slot in to_prune {
-        if let Some(size) = try_prune_slot(slot, dry_run) {
-            pruned_count += 1;
-            total_reclaimed += size;
-        }
-    }
-
-    let prefix = if dry_run { "[dry-run] " } else { "" };
+    let prefix = dry_run_prefix(dry_run);
     println!(
         "{prefix}LRU Prune: kept {keep_num} newest free slots, pruned {pruned_count} older slots, reclaimed {}.",
         format_size(total_reclaimed)
@@ -228,17 +237,9 @@ pub fn run_lru_prune(slots: &mut [SlotCandidate], keep_num: usize, dry_run: bool
 }
 
 pub fn run_default_prune(slots: &[SlotCandidate], dry_run: bool) {
-    let mut pruned_count = 0;
-    let mut total_reclaimed = 0u64;
+    let (pruned_count, total_reclaimed) = prune_slots(slots, dry_run);
 
-    for slot in slots.iter() {
-        if let Some(size) = try_prune_slot(slot, dry_run) {
-            pruned_count += 1;
-            total_reclaimed += size;
-        }
-    }
-
-    let prefix = if dry_run { "[dry-run] " } else { "" };
+    let prefix = dry_run_prefix(dry_run);
     println!(
         "{prefix}Prune complete: removed {pruned_count} slots, reclaimed {}.",
         format_size(total_reclaimed)
