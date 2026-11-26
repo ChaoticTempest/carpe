@@ -91,11 +91,22 @@ it against the current git/build state using
 
 Sort order is **score descending → timestamp descending → slot index
 ascending**. Candidates are tried in that order, skipping slots that cannot be
-locked. If every candidate is busy (or none exist), a new slot is allocated at
-`max(existing indices) + 1` (or `0` for an empty pool), created on disk, and
-locked. The chosen slot becomes the new preferred slot and its `.carpe-meta` is
-rewritten. Branch matching is deliberately excluded for detached `HEAD`
-(`GitState::detect` filters the literal branch value `HEAD`).
+locked. [`select_slot`](../src/slots.rs) returns an `io::Result<(usize,
+PathBuf, Lock)>`; `run_cargo` prints `carpe: <error>` to stderr and exits `1`
+when selection fails.
+
+If every candidate is busy (or none exist), [`allocate_new_slot`](../src/slots.rs)
+allocates a new slot from a **bounded pool of 16 indices** (`0..16`, i.e. `0`
+through `15`; `MAX_NEW_SLOT_ATTEMPTS = 16`). Each attempt re-scans the pool and
+prefers `highest existing index + 1`, falling back to the lowest untried gap
+when that would exceed `15`. `fs::create_dir` claims the slot directory
+atomically, so concurrent callers cannot lock the same index. After 16
+contended attempts, allocation returns `io::ErrorKind::WouldBlock` with the
+message `no free slot after 16 attempts`: no slot `16` is created and no panic
+occurs. The chosen slot is created on disk, locked, becomes the new preferred
+slot, and has its `.carpe-meta` rewritten. Branch matching is deliberately
+excluded for detached `HEAD` (`GitState::detect` filters the literal branch
+value `HEAD`).
 
 ## Locking
 
@@ -103,8 +114,8 @@ Each slot has a `.carpe-lock` file. [`try_lock`](../src/lockfile.rs) opens it
 with `create(true)` and `truncate(false)`, takes a non-blocking exclusive write
 lock with `fd-lock`, and returns `Ok(Some(Lock))`, `Ok(None)` (busy), or an I/O
 error. `Lock` owns both the boxed `RwLock` and its write guard, so the lock is
-held until the guard is dropped. `select_slot` returns the guard to
-`run_cargo`, which keeps it alive for the whole invocation; on Unix cargo
+held until the guard is dropped. `select_slot` returns the guard inside its
+`io::Result` to `run_cargo`, which keeps it alive for the whole invocation; on Unix cargo
 `exec`s in place, so the OS releases the lock when the process exits. `status`
 and `prune` use the same primitive to classify slots as busy, and `prune`
 re-locks immediately before deleting a slot directory.

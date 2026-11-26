@@ -37,10 +37,12 @@ Runs Cargo with a coordinated `CARGO_TARGET_DIR`:
 - Resolves the base directory from `--manifest-path` (or `--manifest-path=…`)
   by taking its parent; otherwise uses the current directory. This determines
   workspace/repo detection outside git.
-- Detects the repo or workspace, selects and locks a slot (see
+- Detects the repo or workspace, selects and locks a slot from the bounded pool
+  of indices `0..16` (see
   [architecture](architecture.md#affinity-scoring-and-fallback-allocation)), prints which
   slot is in use, then execs the real cargo with `CARGO_TARGET_DIR` set to that
-  slot.
+  slot. If none of the 16 slots can be locked, carpe reports
+  `carpe: no free slot after 16 attempts` and exits `1` without running cargo.
 - On Unix carpe `exec`s cargo, so cargo's exit code and signals are the
   process's own. On Windows carpe waits and exits with the child's code, or
   `1` if there is no code.
@@ -133,6 +135,7 @@ Prints `carpe 0.1.0` to stdout.
 | `CARGO_TARGET_DIR` or `CARGO_BUILD_TARGET_DIR` is set and non-empty | `Warning target directory is set in environment (…), overriding with carpe slot …`; carpe overrides it for cargo |
 | `--target-dir` or `--target-dir=…` passed | `Warning explicit --target-dir flag passed in arguments; Cargo CLI flag will take precedence over carpe slot …` |
 | Preferred slot is busy | `Carpe preferred slot <pool>-<n> is busy, using <pool>-<m> instead (parallel build)` |
+| All 16 bounded slots are contended | `carpe: no free slot after 16 attempts`; no slot `16` is created, cargo is not run, and exit status is `1` |
 | I/O error locking a slot | `carpe: warning: couldn't lock <path> (…), skipping`; the next ranked candidate is tried |
 | Cache exceeds `CARPE_MAX_STORAGE_GB` | `carpe: warning: total cache size across all pools is … (exceeds … GB storage budget)`, with a suggestion to run `carpe prune -a` or `carpe prune --lru 2` |
 | Interactive prune in CI or a non-terminal | `carpe: interactive prompt disabled in non-interactive / CI environment.`; no pruning occurs |
@@ -160,9 +163,11 @@ Prints `carpe 0.1.0` to stdout.
 | Code | When |
 | --- | --- |
 | `0` | Successful `status`, `info`, `toggle-override`, `prune`, help/version; Cargo's success when carpe execs it |
-| `1` | Prune usage errors (unknown option, missing/invalid `--lru`), failure to exec cargo, or (off Unix) a child with no exit code |
+| `1` | Prune usage errors (unknown option, missing/invalid `--lru`), slot allocation exhaustion (`carpe: no free slot after 16 attempts`), failure to exec cargo, or (off Unix) a child with no exit code |
 | `2` | `carpe` invoked with no arguments |
 | cargo's own | On Unix cargo replaces the carpe process via `exec`, so its exit status/signal is returned directly |
 
-Unexpected internal I/O failures (for example, an unreadable current directory)
-panic rather than using the codes above.
+Slot allocation failures are reported cleanly via `select_slot`'s `io::Result`
+with the message above and exit `1`. Other unexpected internal I/O failures
+(for example, an unreadable current directory) still panic rather than using
+the codes above.

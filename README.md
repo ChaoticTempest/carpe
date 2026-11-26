@@ -52,10 +52,20 @@ unlocked slots can be chosen.
 
 Ties are broken by **score descending → timestamp descending → slot index
 ascending**. The chosen slot's `.carpe-meta` is rewritten and the worktree's
-preferred-slot marker is updated. If every candidate is locked, a new slot is
-created at the highest existing index + 1. Each slot's `.carpe-lock` file is
-locked non-blockingly with [`fd-lock`](https://crates.io/crates/fd-lock)
-(`flock` on Unix, `LockFileEx` on Windows) and held until cargo exits.
+preferred-slot marker is updated.
+
+If every candidate is locked (or the pool is empty), carpe allocates a new
+slot from a **bounded pool of 16 indices**: `0..16` (that is, `0` through `15`;
+`MAX_NEW_SLOT_ATTEMPTS = 16`). It first tries the index after the highest
+existing slot; once that would reach `16`, it reuses the lowest unused gap.
+Every attempt re-scans the pool and uses an atomic directory creation, so
+racing worktrees cannot claim the same index. If all 16 slots are contended,
+carpe prints `carpe: no free slot after 16 attempts` and exits `1` — it neither
+panics nor creates a slot `16`.
+
+Each slot's `.carpe-lock` file is locked non-blockingly with
+[`fd-lock`](https://crates.io/crates/fd-lock) (`flock` on Unix, `LockFileEx` on
+Windows) and held until cargo exits.
 
 ## Cache layout
 
@@ -118,6 +128,13 @@ $ carpe build
 $ carpe build
       Carpe using <cache-root>/carpe/myrepo-a1b2c3d4-1
     Finished `dev` profile
+```
+
+If all 16 slots are busy, the build fails cleanly instead of panicking:
+
+```console
+$ carpe build
+carpe: no free slot after 16 attempts   # exit status 1
 ```
 
 Inspect the pool:
