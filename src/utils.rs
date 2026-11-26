@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -182,6 +183,43 @@ pub fn which_bin(name: &str) -> Option<PathBuf> {
     None
 }
 
+#[cfg(unix)]
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
+    false
+}
+
+/// True only when `candidate` is the very same file as the `rustup` executable
+/// in its canonicalized bin directory. On Unix a rustup proxy is a symlink or
+/// hardlink to rustup, detected via `dev`/`ino`. On non-Unix platforms (e.g.
+/// Windows, where rustup proxies are copies rather than links) this check
+/// conservatively returns false so cargo is resolved via `rustup which cargo`
+/// for toolchain selection. A merely co-located cargo, e.g. a distro cargo in
+/// `/usr/bin`, does not qualify either.
+fn is_rustup_proxy(candidate_canon: &Path, bin_dir_canon: &Path) -> bool {
+    let Some(parent) = candidate_canon.parent() else {
+        return false;
+    };
+    if parent != bin_dir_canon {
+        return false;
+    }
+    let rustup = parent.join(if cfg!(windows) {
+        "rustup.exe"
+    } else {
+        "rustup"
+    });
+    let (Ok(cargo_meta), Ok(rustup_meta)) = (fs::metadata(candidate_canon), fs::metadata(&rustup))
+    else {
+        return false;
+    };
+    same_file(&cargo_meta, &rustup_meta)
+}
+
 pub fn real_cargo_cmd(args: &[String]) -> Command {
     if let Ok(path) = env::var("CARPE_CARGO_PATH") {
         let mut cmd = Command::new(path);
@@ -203,6 +241,32 @@ pub fn real_cargo_cmd(args: &[String]) -> Command {
             cmd.arg(format!("+{toolchain}")).arg("cargo");
             cmd.env("_CARPE_RECURSION_GUARD", "1");
             return cmd;
+        }
+    }
+
+    // Cheap, subprocess-free path: rustup's own proxy resolves the toolchain
+    // implicitly, so it is safe to use directly. Anything else in PATH must go
+    // through `rustup which cargo` first to honour rust-toolchain.toml,
+    // RUSTUP_TOOLCHAIN and rustup's default toolchain.
+    let rustup_bin_dir = canonicalize_best_effort(&cargo_bin_dir());
+    if let Ok(cur_exe) = env::current_exe() {
+        let cur_canon = canonicalize_best_effort(&cur_exe);
+        if let Ok(path_os) = env::var("PATH") {
+            for dir in env::split_paths(&path_os) {
+                let candidate = dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+                if !candidate.is_file() || is_carpe_shim(&candidate) {
+                    continue;
+                }
+                let candidate_canon = canonicalize_best_effort(&candidate);
+                if candidate_canon == cur_canon
+                    || !is_rustup_proxy(&candidate_canon, &rustup_bin_dir)
+                {
+                    continue;
+                }
+                let mut cmd = Command::new(candidate);
+                cmd.env("_CARPE_RECURSION_GUARD", "1");
+                return cmd;
+            }
         }
     }
 
@@ -243,15 +307,43 @@ pub fn real_cargo_cmd(args: &[String]) -> Command {
     cmd
 }
 
-pub fn is_override_enabled() -> bool {
-    let shim_path = cargo_shim_path();
-    if let Ok(content) = fs::read_to_string(&shim_path) {
-        content.contains("# carpe-shim") || content.contains("rem carpe-shim")
-    } else if let Ok(target) = fs::read_link(&shim_path) {
-        target.to_string_lossy().contains("carpe")
-    } else {
-        false
+/// Detects a carpe wrapper: the marker scripts written by `run_toggle_override`
+/// or a symlink pointing at carpe.
+pub fn is_carpe_shim(path: &Path) -> bool {
+    const MAX_SHIM_BYTES: u64 = 4096;
+
+    // A symlink can be classified without opening (possibly huge) target.
+    if let Ok(link_meta) = fs::symlink_metadata(path) {
+        if link_meta.is_symlink() {
+            if let Ok(target) = fs::read_link(path) {
+                if target.to_string_lossy().contains("carpe") {
+                    return true;
+                }
+            }
+        }
     }
+
+    // Shim scripts are tiny; never read whole native cargo/rustup binaries.
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() > MAX_SHIM_BYTES {
+        return false;
+    }
+
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = Vec::new();
+    if file.take(MAX_SHIM_BYTES).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    std::str::from_utf8(&buf)
+        .is_ok_and(|content| content.contains("# carpe-shim") || content.contains("rem carpe-shim"))
+}
+
+pub fn is_override_enabled() -> bool {
+    is_carpe_shim(&cargo_shim_path())
 }
 
 pub fn run_toggle_override() {
@@ -590,5 +682,102 @@ mod tests {
     fn test_real_cargo_cmd() {
         let cmd = real_cargo_cmd(&["build".into()]);
         assert!(!cmd.get_program().to_string_lossy().is_empty());
+    }
+
+    #[test]
+    fn test_is_carpe_shim() {
+        let root = env::temp_dir().join(format!("carpe_shim_test_{}", test_rand_nonce()));
+        fs::create_dir_all(&root).unwrap();
+
+        let script = root.join("cargo");
+        fs::write(&script, "#!/bin/sh\n# carpe-shim\nexec carpe \"$@\"\n").unwrap();
+        assert!(is_carpe_shim(&script));
+
+        let plain = root.join("plain-cargo");
+        fs::write(&plain, "#!/bin/sh\nexec /usr/bin/cargo \"$@\"\n").unwrap();
+        assert!(!is_carpe_shim(&plain));
+
+        // Non-UTF-8 binary data must not be treated as a shim.
+        let binary = root.join("binary-cargo");
+        let mut binary_bytes = vec![0xff, b'E', b'L', b'F', 0x00, 0x01, 0x02];
+        binary_bytes.extend_from_slice(b"# carpe-shim\n");
+        fs::write(&binary, binary_bytes).unwrap();
+        assert!(!is_carpe_shim(&binary));
+
+        // Oversized files are skipped entirely, even if a marker is present
+        // just past the read limit.
+        let oversized = root.join("oversized-cargo");
+        let mut oversized_bytes = vec![b'x'; 4096];
+        oversized_bytes.extend_from_slice(b"\n# carpe-shim\n");
+        fs::write(&oversized, oversized_bytes).unwrap();
+        assert!(!is_carpe_shim(&oversized));
+
+        #[cfg(unix)]
+        {
+            let link = root.join("cargo-link");
+            let _ = std::os::unix::fs::symlink(root.join("carpe-wrapper"), &link);
+            assert!(is_carpe_shim(&link));
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_is_rustup_proxy_requires_same_file_as_rustup() {
+        let root = env::temp_dir().join(format!("carpe_proxy_test_{}", test_rand_nonce()));
+        let bin = root.join("rustup-bin");
+        let distro = root.join("distro-bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&distro).unwrap();
+
+        let rustup_name = if cfg!(windows) {
+            "rustup.exe"
+        } else {
+            "rustup"
+        };
+        let cargo_name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+
+        // A distinct cargo in a directory that also holds rustup must not qualify.
+        fs::write(distro.join(rustup_name), "#!/bin/sh\n").unwrap();
+        let distro_cargo = distro.join(cargo_name);
+        fs::write(&distro_cargo, "#!/bin/sh\nexec /usr/bin/cargo \"$@\"\n").unwrap();
+        assert!(
+            !is_rustup_proxy(
+                &canonicalize_best_effort(&distro_cargo),
+                &canonicalize_best_effort(&distro)
+            ),
+            "a co-located but distinct cargo must not qualify"
+        );
+
+        #[cfg(unix)]
+        {
+            let rustup = bin.join(rustup_name);
+            fs::write(&rustup, "#!/bin/sh\n").unwrap();
+
+            // A hardlink shares rustup's inode under a distinct path, matching
+            // the real-world rustup proxy layout.
+            let hardlinked = bin.join(format!("{cargo_name}-hardlink"));
+            fs::hard_link(&rustup, &hardlinked).unwrap();
+            assert!(
+                is_rustup_proxy(
+                    &canonicalize_best_effort(&hardlinked),
+                    &canonicalize_best_effort(&bin)
+                ),
+                "a hardlink to rustup qualifies"
+            );
+
+            // A symlink to rustup resolves to the same file as well.
+            let cargo = bin.join(cargo_name);
+            std::os::unix::fs::symlink(&rustup, &cargo).unwrap();
+            assert!(
+                is_rustup_proxy(
+                    &canonicalize_best_effort(&cargo),
+                    &canonicalize_best_effort(&bin)
+                ),
+                "a symlink to rustup qualifies"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

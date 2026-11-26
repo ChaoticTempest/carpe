@@ -87,12 +87,11 @@ fn allocate_new_slot(dir_name: &str, root: &Path) -> io::Result<(usize, PathBuf,
 pub fn select_slot(
     identity: &RepoIdentity,
     root: &Path,
-    cwd: &Path,
+    git_state: &GitState,
     args: &[String],
 ) -> io::Result<(usize, PathBuf, lockfile::Lock)> {
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
-    let git_state = GitState::detect(cwd);
     let build_state = CargoBuildState::parse(args);
 
     let candidates = existing_slot_indices(root, &dir_name);
@@ -103,7 +102,7 @@ pub fn select_slot(
         .map(|&idx| {
             let path = root.join(format!("{dir_name}-{idx}"));
             let meta = SlotMeta::read(&path).unwrap_or_default();
-            let mut score = meta.score(&git_state, &build_state);
+            let mut score = meta.score(git_state, &build_state);
             if preferred == Some(idx) {
                 score += 75; // Baseline priority weight for this worktree's preferred slot
             }
@@ -145,7 +144,7 @@ pub fn select_slot(
         identity.write_preferred_slot(slot_idx);
     }
 
-    SlotMeta::write(&slot_path, &git_state, &build_state);
+    SlotMeta::write(&slot_path, git_state, &build_state);
 
     Ok((slot_idx, slot_path, lock))
 }
@@ -419,13 +418,15 @@ mod tests {
         let main_identity = RepoIdentity::detect(&main_repo);
         let wt_identity = RepoIdentity::detect(&wt_repo);
 
-        let (slot_a, path_a, lock_a) = select_slot(&main_identity, &cache_temp, &main_repo, &[])
-            .expect("first slot allocation should succeed");
+        let (slot_a, path_a, lock_a) =
+            select_slot(&main_identity, &cache_temp, &GitState::default(), &[])
+                .expect("first slot allocation should succeed");
         assert_eq!(slot_a, 0, "First worktree build should allocate slot 0");
         assert!(path_a.ends_with(format!("{}-0", main_identity.pool_name())));
 
-        let (slot_b, path_b, lock_b) = select_slot(&wt_identity, &cache_temp, &wt_repo, &[])
-            .expect("fallback slot allocation should succeed");
+        let (slot_b, path_b, lock_b) =
+            select_slot(&wt_identity, &cache_temp, &GitState::default(), &[])
+                .expect("fallback slot allocation should succeed");
         assert_eq!(
             slot_b, 1,
             "Second worktree should fall back to slot 1 when slot 0 is locked"
@@ -437,15 +438,17 @@ mod tests {
         drop(lock_a);
         drop(lock_b);
 
-        let (slot_b2, _, lock_b2) = select_slot(&wt_identity, &cache_temp, &wt_repo, &[])
-            .expect("reused preferred slot should be available");
+        let (slot_b2, _, lock_b2) =
+            select_slot(&wt_identity, &cache_temp, &GitState::default(), &[])
+                .expect("reused preferred slot should be available");
         assert_eq!(
             slot_b2, 1,
             "Worktree B should reuse preferred slot 1 when free"
         );
 
-        let (slot_a2, _, lock_a2) = select_slot(&main_identity, &cache_temp, &main_repo, &[])
-            .expect("reused preferred slot should be available");
+        let (slot_a2, _, lock_a2) =
+            select_slot(&main_identity, &cache_temp, &GitState::default(), &[])
+                .expect("reused preferred slot should be available");
         assert_eq!(
             slot_a2, 0,
             "Worktree A should reuse preferred slot 0 when free"
@@ -488,7 +491,7 @@ mod tests {
         let barrier = Barrier::new(thread_count);
         let barrier_ref = &barrier;
         let cache_ref = &cache_root;
-        let cwd_ref = &root_dir;
+        let git_state_ref = &GitState::default();
 
         let results = std::thread::scope(|scope| {
             let mut handles = Vec::new();
@@ -501,7 +504,7 @@ mod tests {
                 handles.push(scope.spawn(move || {
                     // Every caller sees slots 0..4 locked and must take the retry path.
                     barrier_ref.wait();
-                    select_slot(&thread_identity, cache_ref, cwd_ref, &[])
+                    select_slot(&thread_identity, cache_ref, git_state_ref, &[])
                         .expect("a free slot must be allocated without panicking")
                 }));
             }
@@ -563,7 +566,7 @@ mod tests {
             .expect("pre-lock should not hit an I/O error")
             .expect("pre-existing slot should be lockable");
 
-        let (idx, slot_path, lock) = select_slot(&identity, &cache_root, &root_dir, &[])
+        let (idx, slot_path, lock) = select_slot(&identity, &cache_root, &GitState::default(), &[])
             .expect("a free gap below the busy highest slot must be allocated");
         assert!(
             idx < busy_idx,
@@ -609,7 +612,7 @@ mod tests {
             );
         }
 
-        let err = select_slot(&identity, &cache_root, &root_dir, &[])
+        let err = select_slot(&identity, &cache_root, &GitState::default(), &[])
             .err()
             .expect("all bounded slot attempts are contended");
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
