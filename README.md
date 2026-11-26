@@ -35,6 +35,12 @@ Cargo subcommands (`fmt`, `add`, `remove`, `rm`, `metadata`, `tree`, `new`,
 `init`, `publish`, `search`, `login`, `logout`, `owner`, `vendor`, `yank`) are
 forwarded straight to cargo without allocating a slot.
 
+`status` and `info` walk the cache root **once** via `scan_slots_with_total`:
+the slot list, each slot's size, and the total across all top-level
+directories (including non-slot directories such as `state/`) come from that
+single pass. The storage-budget warning uses that same total, so no second
+root traversal is needed.
+
 ## Slot selection & affinity
 
 Slots are ranked holistically across all existing slots in the pool; only
@@ -65,7 +71,13 @@ panics nor creates a slot `16`.
 
 Each slot's `.carpe-lock` file is locked non-blockingly with
 [`fd-lock`](https://crates.io/crates/fd-lock) (`flock` on Unix, `LockFileEx` on
-Windows) and held until cargo exits.
+Windows) and held until cargo exits. On Unix, cargo replaces carpe via
+`exec()`, so carpe clears `FD_CLOEXEC` on the lock file descriptor in a
+`pre_exec` hook before the `exec()`: otherwise the descriptor would be closed
+during `exec()` and the `flock` released for the whole build, letting another
+carpe steal the slot. The trade-off is that the descriptor is inherited by
+cargo and its descendants, so a long-lived background descendant can keep the
+slot marked busy even after cargo exits.
 
 ## Cache layout
 

@@ -7,7 +7,7 @@ below, declared in [`src/main.rs`](../src/main.rs).
 | --- | --- |
 | `src/main.rs` | Argument dispatch, usage/version, `status` and `info` rendering, setting `CARGO_TARGET_DIR`, exec'ing cargo |
 | `src/repo.rs` | Git/workspace identity detection, pool naming, `carpe-slot` marker I/O |
-| `src/slots.rs` | Slot discovery, affinity ranking, allocation, `status`/`prune` slot listing |
+| `src/slots.rs` | Slot discovery, affinity ranking, allocation, single-pass cache-root scan for `status`/`info`, `prune` slot listing |
 | `src/meta.rs` | Git/build state extraction, `.carpe-meta` read/write, affinity score |
 | `src/lockfile.rs` | Non-blocking advisory whole-file locking via `fd-lock` |
 | `src/prune.rs` | Prune modes (default, interactive, LRU, auto), deletion with re-locking |
@@ -37,10 +37,13 @@ below, declared in [`src/main.rs`](../src/main.rs).
 - `basename` is `name_source.file_name()` (or `project` if unavailable).
 - `sanitize` keeps ASCII alphanumerics, `-`, and `_`, replacing every other
   character with `-`.
-- The hash is the first 8 hex digits of `DefaultHasher` applied to the
-  canonicalized identity path string. It only prevents collisions between
-  unrelated repos with the same directory name; it is not a portable/stable
-  hash format across Rust releases.
+- The hash is `short_hash` from [`src/utils.rs`](../src/utils.rs): a stable
+  64-bit FNV-1a hash of the canonicalized identity path string, truncated to
+  the first 8 hex digits. It only prevents collisions between unrelated repos
+  with the same directory name, but unlike `std::collections::hash_map::DefaultHasher`
+  it is portable and stable across Rust releases and toolchains. Upgrading from
+  the old `DefaultHasher`-based pool names creates a new pool once; the old
+  directories can be reclaimed with `carpe prune -a`.
 
 Slots are directories named `<pool>-<index>` inside the cache root. The cache
 root is `dirs::cache_dir()/carpe`: `$XDG_CACHE_HOME/carpe` on Linux/BSD,
@@ -71,6 +74,24 @@ timestamp=<unix seconds>
 `timestamp` is used both as the affinity tie-breaker and as the slot's
 "modified" time in `status`/`info`/`prune` (falling back to the slot directory's
 mtime when the file is absent).
+
+## Status, info, and cache-root scanning
+
+Both `status` and `info` call [`scan_slots_with_total`](../src/slots.rs) once per
+invocation. It walks the cache root exactly once, calling `dir_size` on every
+top-level directory, and returns a `SlotScan` holding two things:
+
+- `slots`: `SlotCandidate`s only for directories matching the current pool
+  (`<pool>-<n>`), with size, busy state, mtime, and the preferred flag.
+- `total_bytes`: the sum of `dir_size` over **all** top-level directories,
+  including non-slot directories such as `state/`.
+
+`status` prints each candidate and its total pool size from that scan, then
+passes `scan.total_bytes` to `check_storage_budget(total_bytes: u64)`. `info`
+derives its free/busy slot counts and pool size from the same `slots` vector and
+uses the same `total_bytes` for the warning. The budget total therefore spans
+all pools, while the listing stays scoped to one pool — and neither command
+needs a second traversal of the cache root.
 
 ## Affinity scoring and fallback allocation
 
@@ -115,10 +136,21 @@ with `create(true)` and `truncate(false)`, takes a non-blocking exclusive write
 lock with `fd-lock`, and returns `Ok(Some(Lock))`, `Ok(None)` (busy), or an I/O
 error. `Lock` owns both the boxed `RwLock` and its write guard, so the lock is
 held until the guard is dropped. `select_slot` returns the guard inside its
-`io::Result` to `run_cargo`, which keeps it alive for the whole invocation; on Unix cargo
-`exec`s in place, so the OS releases the lock when the process exits. `status`
-and `prune` use the same primitive to classify slots as busy, and `prune`
-re-locks immediately before deleting a slot directory.
+`io::Result` to `run_cargo`, which keeps it alive for the whole invocation.
+
+On Unix, cargo replaces carpe in place with `exec()`. Rust opens the lock file
+with `O_CLOEXEC`, so without special handling the descriptor would be closed at
+`exec()` and the `flock` released for the duration of the build. carpe therefore
+passes the raw lock FD to [`clear_cloexec`](../src/lockfile.rs) through a
+`Command::pre_exec` hook before `exec()`: only the `FD_CLOEXEC` bit is cleared,
+all other FD flags are preserved, and the `flock` stays held in the cargo
+image. The trade-off is that the descriptor is also inherited by cargo's
+descendants, so a long-lived background process can keep the slot busy after
+cargo itself exits. On Windows there is no `exec()`; the parent holds the lock
+until the spawned cargo finishes and exits with its status.
+
+`status` and `prune` use the same primitive to classify slots as busy, and
+`prune` re-locks immediately before deleting a slot directory.
 
 ## Real cargo resolution and the override shim
 
