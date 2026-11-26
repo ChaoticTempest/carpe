@@ -101,7 +101,13 @@ fn run_cargo(args: &[String]) {
     let dir_name = identity.pool_name();
     let preferred = identity.read_preferred_slot();
 
-    let (slot_idx, slot_path, _lock) = select_slot(&identity, &root, &git_state, args);
+    let (slot_idx, slot_path, _lock) = match select_slot(&identity, &root, &git_state, args) {
+        Ok(slot) => slot,
+        Err(e) => {
+            eprintln!("carpe: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let env_target_dir = env::var_os("CARGO_TARGET_DIR")
         .or_else(|| env::var_os("CARGO_BUILD_TARGET_DIR"))
